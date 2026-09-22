@@ -15,8 +15,8 @@ internal sealed class InstanceConfig
     /// <summary>What the installed overlays were built for; they are rebuilt when frame or display change.</summary>
     public string? InstalledCutout { get; set; }
 
-    /// <summary>Hide Android's status bar contents and draw an iOS-style time / cellular / Wi-Fi / battery instead.</summary>
-    public bool IosStatusBar { get; set; }
+    /// <summary>Per-emulator override of <see cref="AppConfig.IosStatusBar"/>. Null = follow the global setting.</summary>
+    public bool? IosStatusBar { get; set; }
 }
 
 internal sealed class AppConfig
@@ -52,6 +52,18 @@ internal sealed class AppConfig
 
     /// <summary>Status bar side padding as a fraction of the frame's corner size. Larger pushes clock and icons further in.</summary>
     public double StatusBarPaddingFactor { get; set; } = 0.5;
+
+    /// <summary>
+    /// iOS-style status bar on every emulator: Android's own clock and icons are hidden and an iPhone time / cellular /
+    /// Wi-Fi / battery is drawn instead. Implies matching the Android status bar and cutout to the frame.
+    /// </summary>
+    public bool IosStatusBar { get; set; }
+
+    /// <summary>Whether an emulator shows the iOS-style bar: its own override, else the global setting.</summary>
+    public bool IosStatusBarFor(string title) => Instance(title).IosStatusBar ?? IosStatusBar;
+
+    /// <summary>Whether an emulator gets the cutout / status bar overlays (on its own, or because the iOS bar needs them).</summary>
+    public bool CutoutFor(string title) => Instance(title).MatchAndroidCutout || IosStatusBarFor(title);
 
     /// <summary>Time shown by the iOS-style status bar: "auto" (this PC's time, 12-hour), "24h", or fixed text such as "9:41".</summary>
     public string StatusBarClock { get; set; } = "auto";

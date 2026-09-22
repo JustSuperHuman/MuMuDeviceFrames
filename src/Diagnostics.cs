@@ -196,7 +196,7 @@ internal static class Diagnostics
 
             // With the iOS-style bar on, Android's own is empty; draw ours the way the overlay does.
             FramedScreenshot.StatusBar? bar = null;
-            if (config.Instance(title).IosStatusBar && display != null && AndroidStatusBar.IsHidden(instance)
+            if (config.IosStatusBarFor(title) && display != null && AndroidStatusBar.IsHidden(instance)
                 && AndroidCutout.Measure(frame, display, config.StatusBarPaddingFactor) is { } spec)
                 bar = new FramedScreenshot.StatusBar(StatusBarLayout.From(spec, display), AndroidStatusBar.WantsDarkGlyphs(instance),
                     IosStatusBar.ClockText(config.StatusBarClock), IosStatusBar.Family(config.StatusBarFont));

@@ -186,6 +186,13 @@ internal sealed class TrayApp : ApplicationContext
         }
 
         menu.Items.Add(Check($"Frames enabled  ({Config.Hotkey})", Config.Enabled, ToggleAll));
+        menu.Items.Add(Check("iOS-style status bar on all emulators", Config.IosStatusBar, () =>
+        {
+            Config.IosStatusBar = !Config.IosStatusBar;
+            foreach (var inst in Config.Instances.Values) inst.IosStatusBar = null; // global switch wins everywhere
+            Config.Save();
+            SyncAll();
+        }));
         menu.Items.Add(Check("Hide emulator title bar (clip to screen)", Config.ClipToScreen, () =>
         {
             Config.ClipToScreen = !Config.ClipToScreen;
@@ -258,9 +265,13 @@ internal sealed class TrayApp : ApplicationContext
             else session.RemoveCutout();
         }));
 
-        var iosBar = Check("iOS-style status bar  (time · signal · Wi-Fi · battery)", instance.IosStatusBar, () =>
+        bool iosOn = Config.IosStatusBarFor(session.Title);
+        string iosLabel = instance.IosStatusBar == null ? "iOS-style status bar on this emulator  (following global)" : "iOS-style status bar on this emulator";
+        var iosBar = Check(iosLabel, iosOn, () =>
         {
-            instance.IosStatusBar = !instance.IosStatusBar;
+            // An explicit choice here overrides the global switch; matching the global value clears the override.
+            bool next = !iosOn;
+            instance.IosStatusBar = next == Config.IosStatusBar ? null : next;
             Config.Save();
             session.Sync();
         });
@@ -369,7 +380,7 @@ internal sealed class TrayApp : ApplicationContext
         Config.ClipToScreen = fresh.ClipToScreen; Config.Overlap = fresh.Overlap; Config.ProcessNames = fresh.ProcessNames;
         Config.Instances = fresh.Instances;
         Config.AndroidSdk = fresh.AndroidSdk; Config.StatusBarPaddingFactor = fresh.StatusBarPaddingFactor;
-        Config.StatusBarClock = fresh.StatusBarClock; Config.StatusBarFont = fresh.StatusBarFont;
+        Config.StatusBarClock = fresh.StatusBarClock; Config.StatusBarFont = fresh.StatusBarFont; Config.IosStatusBar = fresh.IosStatusBar;
         bool interactiveChanged = Config.BezelInteractive != fresh.BezelInteractive;
         Config.BezelInteractive = fresh.BezelInteractive;
         if (Config.Hotkey != fresh.Hotkey)

@@ -16,7 +16,7 @@ internal static class AndroidCutout
 {
     public const string FrameworkOverlay = "com.justsuperhuman.deviceframes.cutout";
     public const string SystemUiOverlay = "com.justsuperhuman.deviceframes.systemui";
-    private const string Version = "v2";
+    private const string Version = "v3";
 
     /// <summary>Cutout and corner measurements in the emulator's native pixels.</summary>
     internal sealed record Spec(string? CutoutPath, string? CutoutRect, int StatusBarHeight, int CornerRadius, int SidePadding, Rectangle? Cutout)
@@ -149,6 +149,8 @@ internal static class AndroidCutout
         {
             systemUi.AppendLine("    <integer name=\"max_notif_static_icons\">0</integer>");
             systemUi.AppendLine("    <dimen name=\"overflow_dot_radius\">0px</dimen>"); // the "more notifications" dot
+            // Android 15's clock ignores the icon blocklist; a zero text size is the one switch it still honours.
+            systemUi.AppendLine("    <dimen name=\"status_bar_clock_size\">0px</dimen>");
         }
 
         string work = Path.Combine(Path.GetTempPath(), "MuMuDeviceFrames", Guid.NewGuid().ToString("N"));

@@ -68,8 +68,10 @@ corner radius and status-bar side padding. It follows frame changes automaticall
 emulator restarts, and unticking it uninstalls everything. `StatusBarPaddingFactor` in the config moves the clock and
 icons further in or out.
 
-**iOS-style status bar** (per emulator) empties Android's status bar through SystemUI's icon blocklist
-(`settings put secure icon_blacklist …`) and the SystemUI overlay (no notification icons or overflow dot), then draws
+**iOS-style status bar on all emulators** (tray menu, or `IosStatusBar` in the config) applies to every emulator as it
+starts; the bezel menu can override it for one emulator. It turns on the cutout matching above by itself, empties
+Android's status bar through SystemUI's icon blocklist (`settings put secure icon_blacklist …`) and the SystemUI overlay
+(no notification icons, overflow dot or clock — Android 15's clock ignores the blocklist), then draws
 the iPhone bar in a click-through window over the picture. Light/dark follows the foreground app's
 `LIGHT_STATUS_BARS` request, polled once a second. `StatusBarClock` sets the time (`auto`, `24h`, or fixed text such as
 `9:41`); `StatusBarFont` picks the font (SF Pro if installed, otherwise Segoe UI Semibold). Works best together with the
@@ -98,6 +100,7 @@ and the Android-matching switch are stored per emulator name. `log.txt` is next 
 | `BezelInteractive` | `true` | `false` makes the frame fully click-through |
 | `Hotkey` | `Ctrl+Alt+F` | |
 | `StatusBarPaddingFactor` | `0.5` | Status-bar side padding as a fraction of the frame's corner size |
+| `IosStatusBar` | `false` | iOS-style status bar on every emulator (per-emulator overrides live under `Instances`) |
 | `StatusBarClock` | `auto` | Time on the iOS-style bar: `auto`, `24h`, or fixed text like `9:41` |
 | `StatusBarFont` | `null` | Font for that time (SF Pro if installed, else Segoe UI Semibold) |
 | `AndroidSdk` | `null` (`ANDROID_HOME`) | SDK folder for the overlays |

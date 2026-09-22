@@ -123,7 +123,7 @@ internal sealed class EmulatorSession : IDisposable
     /// <summary>Keeps the band window in step with the setting, the picture and Android's light/dark request.</summary>
     private void EnsureStatusBar(Point picture)
     {
-        bool wanted = _app.Config.Instance(Title).IosStatusBar && Instance != null && Display != null && Frame != null;
+        bool wanted = _app.Config.IosStatusBarFor(Title) && Instance != null && Display != null && Frame != null;
         if (!wanted)
         {
             if (_barApplied)
@@ -251,8 +251,14 @@ internal sealed class EmulatorSession : IDisposable
         }
 
         var config = _app.Config.Instance(Title);
-        if (!config.MatchAndroidCutout || Instance == null) return;
-        bool iosBar = config.IosStatusBar;
+        if (Instance == null) return;
+        if (!_app.Config.CutoutFor(Title))
+        {
+            // Switched off (here or globally): take the overlays back out.
+            if (config.InstalledCutout != null) RemoveCutout();
+            return;
+        }
+        bool iosBar = _app.Config.IosStatusBarFor(Title);
         string signature = AndroidCutout.Signature(Frame, Display, _app.Config.StatusBarPaddingFactor, iosBar);
         if (signature == config.InstalledCutout || signature == _failedCutout) return;
 
