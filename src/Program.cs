@@ -22,6 +22,8 @@ internal static class Program
             Log.Write($"Download to {root}: {result.Downloaded} new, {result.UpToDate} up to date, {result.Failed} failed of {result.Total}");
             return result.Failed == 0 ? 0 : 1;
         }
+        //   --startup on|off                   start with Windows (per-user Run key)
+        if (args.Length >= 2 && args[0] == "--startup") { Startup.Set(args[1] == "on"); return 0; }
         //   --exit                             ask the running instance to quit cleanly
         if (args.Length >= 1 && args[0] == "--exit") return TrayApp.RequestExitOfRunningInstance() ? 0 : 1;
         if (args.Length >= 1 && args[0] == "--restore") { Restore(); return RestoreAndroid(); }

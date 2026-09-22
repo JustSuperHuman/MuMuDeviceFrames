@@ -42,6 +42,7 @@ internal sealed class TrayApp : ApplicationContext
         Scan();
 
         if (!File.Exists(AppConfig.FilePath)) Config.Save();
+        Startup.Refresh();
         if (Library.Frames.Count == 0) Post(OfferDownload);
     }
 
@@ -221,6 +222,11 @@ internal sealed class TrayApp : ApplicationContext
 
         menu.Items.Add(new ToolStripMenuItem(Library.Frames.Count == 0 ? "Download device frames (~35 MB)…" : "Update device frames from device-frames-media", null, (_, _) => DownloadFrames()) { Enabled = !_downloading });
         menu.Items.Add(new ToolStripMenuItem("Reload frames and config", null, (_, _) => Reload()));
+        menu.Items.Add(Check("Start with Windows", Startup.IsEnabled, () =>
+        {
+            try { Startup.Set(!Startup.IsEnabled); }
+            catch (Exception ex) { Notify($"Could not change Start with Windows: {ex.Message}", warning: true); }
+        }));
         menu.Items.Add(new ToolStripMenuItem("Open config folder", null, (_, _) =>
         {
             Config.Save();

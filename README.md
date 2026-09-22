@@ -51,7 +51,7 @@ For the Android matching (status bar/cutout) the tool needs the Android SDK buil
 | Right-click the bezel | Menu for that emulator: frame, Android matching, screenshot, minimize |
 | Double-click the bezel | Peek: brings MuMu's title bar and toolbar back without dropping the frame; again to hide |
 | `Ctrl+Alt+F` | All frames off / on (off = emulators look exactly like stock MuMu) |
-| Tray icon | Same menus for every emulator, default frame, frame download, exit |
+| Tray icon | Same menus for every emulator, default frame, frame download, Start with Windows, exit |
 
 Frame menus mark each model `● exact fit` / `○ near fit` for that emulator's picture. A frame whose screen aspect is
 within 1.5 % of the emulator's is stretched to fit exactly (invisible); anything further off keeps its proportions and
@@ -106,7 +106,7 @@ and the Android-matching switch are stored per emulator name. `log.txt` is next 
 | `AndroidSdk` | `null` (`ANDROID_HOME`) | SDK folder for the overlays |
 | `ProcessNames` | `MuMuNxDevice, MuMuPlayer, NemuPlayer` | Emulator executables to attach to |
 
-Command line: `--exit` (quit the running instance cleanly) · `--restore` (un-clip all emulator windows; only needed if
+Command line: `--exit` (quit the running instance cleanly) · `--startup on|off` (start with Windows) · `--restore` (un-clip all emulator windows; only needed if
 the app was killed — starting it again does the same) · `--download [folder]` (fetch the frame set) ·
 `--screenshot <emulator> <out.png> [frame] [transparent|checker|#RRGGBB]` (framed screenshot at native resolution) ·
 `--snapshot <emulator> <out.png> [frame|-] [background]` (composite of the window and the frame, for checking
