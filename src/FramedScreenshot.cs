@@ -10,15 +10,18 @@ namespace MuMuDeviceFrames;
 /// </summary>
 internal static class FramedScreenshot
 {
+    /// <summary>iOS-style status bar to draw over the screenshot (when the emulator's own is hidden).</summary>
+    public sealed record StatusBar(StatusBarLayout Layout, bool DarkGlyphs, string Time, FontFamily Font);
+
     /// <param name="background">"transparent" (default), "checker" or a #RRGGBB colour.</param>
-    public static string? Save(MuMuInstance instance, FrameInfo frame, string outPath, string? background = null)
+    public static string? Save(MuMuInstance instance, FrameInfo frame, string outPath, string? background = null, StatusBar? statusBar = null)
     {
         var png = instance.Screencap();
         if (png == null) return "adb screencap failed";
-        return Compose(frame, png, outPath, background);
+        return Compose(frame, png, outPath, background, statusBar);
     }
 
-    public static string? Compose(FrameInfo frame, byte[] screenshotPng, string outPath, string? background)
+    public static string? Compose(FrameInfo frame, byte[] screenshotPng, string outPath, string? background, StatusBar? statusBar = null)
     {
         var source = FrameSource.Load(frame);
         var screen = source.Screen;
@@ -68,6 +71,13 @@ internal static class FramedScreenshot
             }
         }
         fitted.UnlockBits(data);
+
+        if (statusBar != null)
+        {
+            float scale = (float)screen.Width / statusBar.Layout.Screen.Width;
+            IosStatusBar.DrawInto(canvas, width, height, g =>
+                IosStatusBar.Draw(g, new PointF(screen.X, screen.Y), scale, statusBar.Layout, statusBar.DarkGlyphs, statusBar.Time, statusBar.Font));
+        }
 
         // Frame over the top (premultiplied source-over).
         for (int i = 0; i < width * height; i++)

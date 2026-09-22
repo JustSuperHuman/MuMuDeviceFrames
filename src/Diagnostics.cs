@@ -193,7 +193,15 @@ internal static class Diagnostics
             var frame = library.Find(frameKey) ?? library.Find(config.Instance(title).Frame) ?? library.Find(config.DefaultFrame)
                         ?? (display == null ? null : library.BestMatch(display.Native.Width, display.Native.Height));
             if (frame == null) { Log.Write("Screenshot: no frame available"); return 3; }
-            var error = FramedScreenshot.Save(instance, frame, outPath, background);
+
+            // With the iOS-style bar on, Android's own is empty; draw ours the way the overlay does.
+            FramedScreenshot.StatusBar? bar = null;
+            if (config.Instance(title).IosStatusBar && display != null && AndroidStatusBar.IsHidden(instance)
+                && AndroidCutout.Measure(frame, display, config.StatusBarPaddingFactor) is { } spec)
+                bar = new FramedScreenshot.StatusBar(StatusBarLayout.From(spec, display), AndroidStatusBar.WantsDarkGlyphs(instance),
+                    IosStatusBar.ClockText(config.StatusBarClock), IosStatusBar.Family(config.StatusBarFont));
+
+            var error = FramedScreenshot.Save(instance, frame, outPath, background, bar);
             Log.Write(error == null ? $"Screenshot '{title}' in {frame.Key} -> {outPath}" : $"Screenshot '{title}' failed: {error}");
             return error == null ? 0 : 1;
         }

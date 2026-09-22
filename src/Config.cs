@@ -14,6 +14,9 @@ internal sealed class InstanceConfig
 
     /// <summary>What the installed overlays were built for; they are rebuilt when frame or display change.</summary>
     public string? InstalledCutout { get; set; }
+
+    /// <summary>Hide Android's status bar contents and draw an iOS-style time / cellular / Wi-Fi / battery instead.</summary>
+    public bool IosStatusBar { get; set; }
 }
 
 internal sealed class AppConfig
@@ -49,6 +52,12 @@ internal sealed class AppConfig
 
     /// <summary>Status bar side padding as a fraction of the frame's corner size. Larger pushes clock and icons further in.</summary>
     public double StatusBarPaddingFactor { get; set; } = 0.5;
+
+    /// <summary>Time shown by the iOS-style status bar: "auto" (this PC's time, 12-hour), "24h", or fixed text such as "9:41".</summary>
+    public string StatusBarClock { get; set; } = "auto";
+
+    /// <summary>Font family for the iOS-style time. Null = SF Pro if installed, otherwise Segoe UI Semibold.</summary>
+    public string? StatusBarFont { get; set; }
 
     /// <summary>Executable names (without .exe) whose windows are checked for a MuMu render surface.</summary>
     public List<string> ProcessNames { get; set; } = ["MuMuNxDevice", "MuMuPlayer", "NemuPlayer"];

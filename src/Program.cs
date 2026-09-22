@@ -24,7 +24,7 @@ internal static class Program
         }
         //   --exit                             ask the running instance to quit cleanly
         if (args.Length >= 1 && args[0] == "--exit") return TrayApp.RequestExitOfRunningInstance() ? 0 : 1;
-        if (args.Length >= 1 && args[0] == "--restore") return Restore();
+        if (args.Length >= 1 && args[0] == "--restore") { Restore(); return RestoreAndroid(); }
         //   --render <key> <w> <h> <out.png>   frame rendered for an arbitrary picture size (no emulator needed)
         if (args.Length >= 5 && args[0] == "--render" && int.TryParse(args[2], out int w) && int.TryParse(args[3], out int h))
             return Diagnostics.RenderOnly(args[1], w, h, args[4]);
@@ -91,6 +91,20 @@ internal static class Program
             return true;
         }, IntPtr.Zero);
         Log.Write($"Restore: cleared clip region on {count} emulator window(s)");
+        return 0;
+    }
+
+    /// <summary>Brings back the Android status bar on every running instance whose bar this tool hid (after a crash/kill).</summary>
+    private static int RestoreAndroid()
+    {
+        int count = 0;
+        foreach (var instance in MuMuControl.RunningInstances())
+        {
+            if (!AndroidStatusBar.IsHidden(instance)) continue;
+            AndroidStatusBar.Restore(instance);
+            count++;
+        }
+        Log.Write($"Restore: Android status bar restored on {count} emulator(s)");
         return 0;
     }
 }

@@ -258,6 +258,15 @@ internal sealed class TrayApp : ApplicationContext
             else session.RemoveCutout();
         }));
 
+        var iosBar = Check("iOS-style status bar  (time · signal · Wi-Fi · battery)", instance.IosStatusBar, () =>
+        {
+            instance.IosStatusBar = !instance.IosStatusBar;
+            Config.Save();
+            session.Sync();
+        });
+        iosBar.Enabled = session.Instance != null;
+        items.Add(iosBar);
+
         if (session is { Display: { } display, Frame: { } frame })
         {
             var target = frame.Screen.Size;
@@ -296,9 +305,10 @@ internal sealed class TrayApp : ApplicationContext
         SetForegroundWindow(_window.Handle);
         if (dialog.ShowDialog() != DialogResult.OK) return;
         string path = dialog.FileName;
+        var bar = session.StatusBarForScreenshot() is { } s ? new FramedScreenshot.StatusBar(s.Layout, s.Dark, s.Time, IosStatusBar.Family(Config.StatusBarFont)) : null;
         Task.Run(() =>
         {
-            var error = FramedScreenshot.Save(instance, frame, path);
+            var error = FramedScreenshot.Save(instance, frame, path, null, bar);
             Post(() => Notify(error == null ? $"Saved {Path.GetFileName(path)}" : $"Screenshot failed: {error}", error != null));
         });
     }
@@ -359,6 +369,7 @@ internal sealed class TrayApp : ApplicationContext
         Config.ClipToScreen = fresh.ClipToScreen; Config.Overlap = fresh.Overlap; Config.ProcessNames = fresh.ProcessNames;
         Config.Instances = fresh.Instances;
         Config.AndroidSdk = fresh.AndroidSdk; Config.StatusBarPaddingFactor = fresh.StatusBarPaddingFactor;
+        Config.StatusBarClock = fresh.StatusBarClock; Config.StatusBarFont = fresh.StatusBarFont;
         bool interactiveChanged = Config.BezelInteractive != fresh.BezelInteractive;
         Config.BezelInteractive = fresh.BezelInteractive;
         if (Config.Hotkey != fresh.Hotkey)

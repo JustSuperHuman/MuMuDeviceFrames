@@ -26,6 +26,11 @@ was nothing like it.
 - **145 frames** from the open [device-frames-media](https://github.com/jonnyjackson26/device-frames-media) set —
   iPhone 6s to 17 Pro Max, iPhone Air, Pixel 8/9, Galaxy S21, iPads, Apple Watch — downloaded on first run.
 
+- **iOS-style status bar (optional).** Hides Android's clock and icons and draws an iPhone status bar in their place:
+  bold time, cellular bars, Wi-Fi and battery, centred on the island and switching between black and white with
+  whatever the app asks for. It is click-through, so the notification shade still works, and framed screenshots
+  include it.
+
 ![Status bar before and after matching the cutout](docs/cutout.png)
 
 ## Install
@@ -63,6 +68,13 @@ corner radius and status-bar side padding. It follows frame changes automaticall
 emulator restarts, and unticking it uninstalls everything. `StatusBarPaddingFactor` in the config moves the clock and
 icons further in or out.
 
+**iOS-style status bar** (per emulator) empties Android's status bar through SystemUI's icon blocklist
+(`settings put secure icon_blacklist …`) and the SystemUI overlay (no notification icons or overflow dot), then draws
+the iPhone bar in a click-through window over the picture. Light/dark follows the foreground app's
+`LIGHT_STATUS_BARS` request, polled once a second. `StatusBarClock` sets the time (`auto`, `24h`, or fixed text such as
+`9:41`); `StatusBarFont` picks the font (SF Pro if installed, otherwise Segoe UI Semibold). Works best together with the
+cutout matching above. Unticking it, exiting, or `--restore` gives Android its own status bar back.
+
 How this works without root: MuMu's Android images are signed with the public AOSP *platform test key*, and Android
 lets an overlay signed like its target override any of the target's resources. The tool generates two tiny
 resource-overlay APKs (`com.justsuperhuman.deviceframes.cutout` → `android`, `….systemui` → `com.android.systemui`),
@@ -86,6 +98,8 @@ and the Android-matching switch are stored per emulator name. `log.txt` is next 
 | `BezelInteractive` | `true` | `false` makes the frame fully click-through |
 | `Hotkey` | `Ctrl+Alt+F` | |
 | `StatusBarPaddingFactor` | `0.5` | Status-bar side padding as a fraction of the frame's corner size |
+| `StatusBarClock` | `auto` | Time on the iOS-style bar: `auto`, `24h`, or fixed text like `9:41` |
+| `StatusBarFont` | `null` | Font for that time (SF Pro if installed, else Segoe UI Semibold) |
 | `AndroidSdk` | `null` (`ANDROID_HOME`) | SDK folder for the overlays |
 | `ProcessNames` | `MuMuNxDevice, MuMuPlayer, NemuPlayer` | Emulator executables to attach to |
 

@@ -34,20 +34,26 @@ internal sealed class OverlayWindow : NativeWindow
         });
     }
 
-    public void SetFrame(RenderedFrame frame, Point position)
+    /// <summary>A second owned window (the status-bar band) that moves together with this one while dragging.</summary>
+    public OverlayWindow? Companion { get; set; }
+
+    public void SetFrame(RenderedFrame frame, Point position) => SetBitmap(frame.Pixels, frame.Width, frame.Height, position);
+
+    /// <summary>Shows a premultiplied BGRA bitmap at the given screen position.</summary>
+    public void SetBitmap(byte[] premultiplied, int width, int height, Point position)
     {
         if (!IsAlive) return;
         IntPtr screenDc = GetDC(IntPtr.Zero);
         IntPtr memDc = CreateCompatibleDC(screenDc);
-        var header = new BITMAPINFOHEADER { Size = 40, Width = frame.Width, Height = -frame.Height, Planes = 1, BitCount = 32 };
+        var header = new BITMAPINFOHEADER { Size = 40, Width = width, Height = -height, Planes = 1, BitCount = 32 };
         IntPtr dib = CreateDIBSection(screenDc, ref header, 0, out IntPtr bits, IntPtr.Zero, 0);
         try
         {
             if (dib == IntPtr.Zero) { Log.Write("CreateDIBSection failed"); return; }
-            System.Runtime.InteropServices.Marshal.Copy(frame.Pixels, 0, bits, frame.Pixels.Length);
+            System.Runtime.InteropServices.Marshal.Copy(premultiplied, 0, bits, width * height * 4);
             IntPtr old = SelectObject(memDc, dib);
             var dst = new POINT { X = position.X, Y = position.Y };
-            var size = new SIZE { Cx = frame.Width, Cy = frame.Height };
+            var size = new SIZE { Cx = width, Cy = height };
             var src = new POINT();
             var blend = new BLENDFUNCTION { BlendOp = 0, SourceConstantAlpha = 255, AlphaFormat = 1 };
             if (!UpdateLayeredWindow(Handle, screenDc, ref dst, ref size, memDc, ref src, 0, ref blend, ULW_ALPHA))
@@ -62,6 +68,8 @@ internal sealed class OverlayWindow : NativeWindow
             ReleaseDC(IntPtr.Zero, screenDc);
         }
     }
+
+    public Point Position => _position;
 
     public void MoveTo(Point position)
     {
@@ -136,15 +144,23 @@ internal sealed class OverlayWindow : NativeWindow
         var overlayPos = new Point(_dragOverlay.X + dx, _dragOverlay.Y + dy);
         if (overlayPos == _position) return;
 
+        var companion = Companion is { IsAlive: true } c ? c : null;
+        var companionPos = companion == null ? Point.Empty : new Point(companion.Position.X + (overlayPos.X - _position.X), companion.Position.Y + (overlayPos.Y - _position.Y));
+
         const uint flags = SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER;
-        IntPtr batch = BeginDeferWindowPos(2);
+        IntPtr batch = BeginDeferWindowPos(3);
         if (batch != IntPtr.Zero) batch = DeferWindowPos(batch, _emulator, IntPtr.Zero, _dragEmulator.X + dx, _dragEmulator.Y + dy, 0, 0, flags);
         if (batch != IntPtr.Zero) batch = DeferWindowPos(batch, Handle, IntPtr.Zero, overlayPos.X, overlayPos.Y, 0, 0, flags);
+        if (batch != IntPtr.Zero && companion != null) batch = DeferWindowPos(batch, companion.Handle, IntPtr.Zero, companionPos.X, companionPos.Y, 0, 0, flags);
         if (batch == IntPtr.Zero || !EndDeferWindowPos(batch))
         {
             SetWindowPos(_emulator, IntPtr.Zero, _dragEmulator.X + dx, _dragEmulator.Y + dy, 0, 0, flags);
             SetWindowPos(Handle, IntPtr.Zero, overlayPos.X, overlayPos.Y, 0, 0, flags);
+            if (companion != null) SetWindowPos(companion.Handle, IntPtr.Zero, companionPos.X, companionPos.Y, 0, 0, flags);
         }
         _position = overlayPos;
+        companion?.NotifyMoved(companionPos);
     }
+
+    internal void NotifyMoved(Point position) => _position = position;
 }

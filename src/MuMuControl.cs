@@ -84,20 +84,45 @@ internal sealed record AndroidDisplay(Size Native, int Density);
 internal static class MuMuControl
 {
     /// <summary>The instance behind an emulator process.</summary>
-    public static MuMuInstance? Locate(uint pid) => Locate(pid, instance => instance.TryGetProperty("pid", out var p) && p.GetUInt32() == pid);
+    public static MuMuInstance? Locate(uint pid) =>
+        Connect(Enumerate(pid).FirstOrDefault(e => e.Pid == pid).Instance);
 
     /// <summary>The instance with the given MuMu name (window title), whether or not its window is visible.</summary>
     public static MuMuInstance? LocateByName(string name)
     {
-        var any = Process.GetProcesses().FirstOrDefault(p => AppConfig.Load().ProcessNames.Contains(p.ProcessName, StringComparer.OrdinalIgnoreCase));
-        if (any == null) return null;
-        try { return Locate((uint)any.Id, instance => instance.TryGetProperty("name", out var n) && n.GetString() == name); }
-        finally { any.Dispose(); }
+        uint any = AnyEmulatorPid();
+        return any == 0 ? null : Connect(Enumerate(any).FirstOrDefault(e => e.Name == name).Instance);
     }
 
-    /// <summary>Finds MuMuManager next to the emulator's executable and asks it about all instances.</summary>
-    private static MuMuInstance? Locate(uint anyEmulatorPid, Func<JsonElement, bool> match)
+    /// <summary>Every instance whose Android is up.</summary>
+    public static List<MuMuInstance> RunningInstances()
     {
+        uint any = AnyEmulatorPid();
+        return any == 0 ? [] : Enumerate(any).Where(e => e.AndroidStarted).Select(e => Connect(e.Instance)!).ToList();
+    }
+
+    private static uint AnyEmulatorPid()
+    {
+        var names = AppConfig.Load().ProcessNames;
+        foreach (var p in Process.GetProcesses())
+        {
+            using (p) if (names.Contains(p.ProcessName, StringComparer.OrdinalIgnoreCase)) return (uint)p.Id;
+        }
+        return 0;
+    }
+
+    private static MuMuInstance? Connect(MuMuInstance? instance)
+    {
+        if (instance != null) ProcessRunner.Run(instance.AdbPath, ["connect", instance.AdbSerial], 15_000);
+        return instance;
+    }
+
+    private readonly record struct Entry(string Name, uint Pid, bool AndroidStarted, MuMuInstance Instance);
+
+    /// <summary>Finds MuMuManager next to the emulator's executable and asks it about all instances that have an adb port.</summary>
+    private static List<Entry> Enumerate(uint anyEmulatorPid)
+    {
+        var entries = new List<Entry>();
         string exe;
         try
         {
@@ -107,7 +132,7 @@ internal static class MuMuControl
         catch (Exception ex)
         {
             Log.Write($"Cannot inspect emulator process {anyEmulatorPid}: {ex.Message}");
-            return null;
+            return entries;
         }
 
         string? manager = null;
@@ -116,7 +141,7 @@ internal static class MuMuControl
         if (manager == null)
         {
             Log.Write($"MuMuManager.exe not found near {exe}");
-            return null;
+            return entries;
         }
 
         string adb = Path.Combine(Path.GetDirectoryName(exe)!, "adb.exe");
@@ -132,20 +157,21 @@ internal static class MuMuControl
             var candidates = doc.RootElement.TryGetProperty("index", out _) ? [doc.RootElement] : doc.RootElement.EnumerateObject().Select(p => p.Value).ToArray();
             foreach (var instance in candidates)
             {
-                if (!match(instance)) continue;
-                if (!instance.TryGetProperty("adb_port", out var port)) break;
+                if (!instance.TryGetProperty("adb_port", out var port)) continue;
                 string host = instance.TryGetProperty("adb_host_ip", out var ip) ? ip.GetString() ?? "127.0.0.1" : "127.0.0.1";
                 string index = instance.GetProperty("index").GetString() ?? "0";
-                var found = new MuMuInstance(index, manager, adb, $"{host}:{port.GetInt32()}");
-                ProcessRunner.Run(adb, ["connect", found.AdbSerial], 15_000);
-                return found;
+                entries.Add(new Entry(
+                    instance.TryGetProperty("name", out var n) ? n.GetString() ?? "" : "",
+                    instance.TryGetProperty("pid", out var p) ? p.GetUInt32() : 0,
+                    instance.TryGetProperty("is_android_started", out var up) && up.GetBoolean(),
+                    new MuMuInstance(index, manager, adb, $"{host}:{port.GetInt32()}")));
             }
         }
         catch (Exception ex)
         {
             Log.Write($"Could not parse MuMuManager info: {ex.Message}");
         }
-        return null;
+        return entries;
     }
 
     public static AndroidDisplay? QueryDisplay(MuMuInstance instance)

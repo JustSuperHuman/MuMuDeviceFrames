@@ -106,6 +106,123 @@ internal sealed class EmulatorSession : IDisposable
         EnsureOverlay()?.MoveTo(position);
         _overlay?.SetVisible(true);
         EnsureAndroid();
+        EnsureStatusBar(new Point(rr.Left, rr.Top));
+    }
+
+    // ---- iOS-style status bar ------------------------------------------------------------------------------------
+
+    private OverlayWindow? _bar;
+    private System.Windows.Forms.Timer? _barTimer;
+    private StatusBarLayout? _barLayout;
+    private string? _barLayoutFrame;
+    private bool _barApplied, _barPolling, _barDark;
+    private (string Time, bool Dark, int Width, int Height)? _barShown;
+
+    public bool StatusBarActive => _barApplied;
+
+    /// <summary>Keeps the band window in step with the setting, the picture and Android's light/dark request.</summary>
+    private void EnsureStatusBar(Point picture)
+    {
+        bool wanted = _app.Config.Instance(Title).IosStatusBar && Instance != null && Display != null && Frame != null;
+        if (!wanted)
+        {
+            if (_barApplied)
+            {
+                _barApplied = false;
+                var instance = Instance!;
+                RunAndroidTask(() => { AndroidStatusBar.Restore(instance); return () => Log.Write($"'{Title}': Android status bar restored"); });
+            }
+            _barTimer?.Stop();
+            _bar?.SetVisible(false);
+            return;
+        }
+
+        if (!_barApplied && !_androidBusy)
+        {
+            _barApplied = true;
+            var instance = Instance!;
+            RunAndroidTask(() =>
+            {
+                AndroidStatusBar.Hide(instance);
+                bool dark = AndroidStatusBar.WantsDarkGlyphs(instance);
+                return () => { _barDark = dark; Log.Write($"'{Title}': Android status bar hidden, iOS-style bar on"); RefreshStatusBar(); };
+            });
+        }
+
+        if (_barLayout == null || _barLayoutFrame != Frame!.Key)
+        {
+            var spec = AndroidCutout.Measure(Frame, Display!, _app.Config.StatusBarPaddingFactor);
+            if (spec == null) return;
+            _barLayout = StatusBarLayout.From(spec, Display!);
+            _barLayoutFrame = Frame.Key;
+            _barShown = null;
+        }
+
+        if (_barTimer == null)
+        {
+            _barTimer = new System.Windows.Forms.Timer { Interval = 1000 };
+            _barTimer.Tick += (_, _) => { if (!_disposed) { PollStatusBarTheme(); RefreshStatusBar(); } };
+        }
+        _barTimer.Start();
+
+        if (_bar is not { IsAlive: true })
+        {
+            try
+            {
+                _bar = new OverlayWindow(Main, interactive: false); // WS_EX_TRANSPARENT: the notification shade stays reachable
+                _barShown = null;
+                if (_overlay != null) _overlay.Companion = _bar;
+            }
+            catch (Exception ex)
+            {
+                Log.Write($"Status bar window failed for '{Title}': {ex.Message}");
+                return;
+            }
+        }
+        RefreshStatusBar();
+        _bar.MoveTo(picture);
+        _bar.SetVisible(true);
+    }
+
+    /// <summary>Asks Android (in the background) whether the foreground app wants dark glyphs; ~50 ms over adb.</summary>
+    private void PollStatusBarTheme()
+    {
+        if (_barPolling || Instance is not { } instance || !_barApplied) return;
+        _barPolling = true;
+        Task.Run(() =>
+        {
+            bool dark = false;
+            try { dark = AndroidStatusBar.WantsDarkGlyphs(instance); }
+            catch (Exception ex) { Log.Write($"'{Title}': theme poll failed: {ex.Message}"); }
+            _app.Post(() =>
+            {
+                _barPolling = false;
+                if (_disposed || dark == _barDark) return;
+                _barDark = dark;
+                RefreshStatusBar();
+            });
+        });
+    }
+
+    /// <summary>Redraws the band when the time, the theme or the picture size changed.</summary>
+    private void RefreshStatusBar()
+    {
+        if (_bar is not { IsAlive: true } || _barLayout == null || _current == null) return;
+        int rw = _current.Key.RenderWidth, rh = _current.Key.RenderHeight;
+        string time = IosStatusBar.ClockText(_app.Config.StatusBarClock);
+        if (_barShown is { } shown && shown.Time == time && shown.Dark == _barDark && shown.Width == rw && shown.Height == rh) return;
+
+        var (pixels, width, height) = IosStatusBar.RenderBand(rw, rh, _barLayout, _barDark, time, IosStatusBar.Family(_app.Config.StatusBarFont));
+        if (!GetWindowRect(Render, out var rr)) return;
+        _bar.SetBitmap(pixels, width, height, new Point(rr.Left, rr.Top));
+        _barShown = (time, _barDark, rw, rh);
+    }
+
+    /// <summary>What a framed screenshot needs to draw the same bar: layout, current theme and time.</summary>
+    public (StatusBarLayout Layout, bool Dark, string Time)? StatusBarForScreenshot()
+    {
+        if (!_barApplied || _barLayout == null) return null;
+        return (_barLayout, _barDark, IosStatusBar.ClockText(_app.Config.StatusBarClock));
     }
 
     // ---- Android side: display info, cutout overlays, resolution ------------------------------------------------
@@ -135,14 +252,15 @@ internal sealed class EmulatorSession : IDisposable
 
         var config = _app.Config.Instance(Title);
         if (!config.MatchAndroidCutout || Instance == null) return;
-        string signature = AndroidCutout.Signature(Frame, Display, _app.Config.StatusBarPaddingFactor);
+        bool iosBar = config.IosStatusBar;
+        string signature = AndroidCutout.Signature(Frame, Display, _app.Config.StatusBarPaddingFactor, iosBar);
         if (signature == config.InstalledCutout || signature == _failedCutout) return;
 
         var (frame, display2, instance2, factor, sdk) = (Frame, Display, Instance, _app.Config.StatusBarPaddingFactor, _app.Config.AndroidSdk);
         RunAndroidTask(() =>
         {
             var spec = AndroidCutout.Measure(frame, display2, factor);
-            string? error = spec == null ? "frame and display orientation differ" : AndroidCutout.Apply(instance2, spec, sdk);
+            string? error = spec == null ? "frame and display orientation differ" : AndroidCutout.Apply(instance2, spec, sdk, iosBar);
             return () =>
             {
                 if (error == null)
@@ -255,7 +373,7 @@ internal sealed class EmulatorSession : IDisposable
         if (_overlay is { IsAlive: true }) return _overlay;
         try
         {
-            _overlay = new OverlayWindow(Main, _app.Config.BezelInteractive);
+            _overlay = new OverlayWindow(Main, _app.Config.BezelInteractive) { Companion = _bar };
             _overlay.MenuRequested += () => _app.ShowSessionMenu(this);
             _overlay.DoubleClicked += () => { Peek = !Peek; Sync(); };
             if (_current != null && GetWindowRect(Render, out var rr))
@@ -322,6 +440,8 @@ internal sealed class EmulatorSession : IDisposable
     public void Suspend()
     {
         _overlay?.SetVisible(false);
+        _bar?.SetVisible(false);
+        _barTimer?.Stop();
         ClearRegion();
     }
 
@@ -355,8 +475,18 @@ internal sealed class EmulatorSession : IDisposable
         ClearRegion();
         _verifyTimer?.Dispose();
         _verifyTimer = null;
+        _barTimer?.Dispose();
+        _barTimer = null;
+        if (_bar is { IsAlive: true }) _bar.DestroyHandle();
+        _bar = null;
         if (_overlay is { IsAlive: true }) _overlay.DestroyHandle();
         _overlay = null;
+        if (_barApplied && Instance is { } instance)
+        {
+            // Synchronous on purpose: this runs while the app exits, and Android must not be left without a status bar.
+            _barApplied = false;
+            try { AndroidStatusBar.Restore(instance); } catch (Exception ex) { Log.Write($"'{Title}': status bar restore failed: {ex.Message}"); }
+        }
         Log.Write($"Detached from '{Title}'");
     }
 }

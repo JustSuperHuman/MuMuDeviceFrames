@@ -16,16 +16,16 @@ internal static class AndroidCutout
 {
     public const string FrameworkOverlay = "com.justsuperhuman.deviceframes.cutout";
     public const string SystemUiOverlay = "com.justsuperhuman.deviceframes.systemui";
-    private const string Version = "v1";
+    private const string Version = "v2";
 
     /// <summary>Cutout and corner measurements in the emulator's native pixels.</summary>
-    internal sealed record Spec(string? CutoutPath, string? CutoutRect, int StatusBarHeight, int CornerRadius, int SidePadding)
+    internal sealed record Spec(string? CutoutPath, string? CutoutRect, int StatusBarHeight, int CornerRadius, int SidePadding, Rectangle? Cutout)
     {
         public bool HasCutout => CutoutPath != null;
     }
 
-    public static string Signature(FrameInfo frame, AndroidDisplay display, double paddingFactor) =>
-        string.Create(CultureInfo.InvariantCulture, $"{Version}|{frame.Key}|{display.Native.Width}x{display.Native.Height}@{display.Density}|{paddingFactor:0.###}");
+    public static string Signature(FrameInfo frame, AndroidDisplay display, double paddingFactor, bool hideNotificationIcons) =>
+        string.Create(CultureInfo.InvariantCulture, $"{Version}|{frame.Key}|{display.Native.Width}x{display.Native.Height}@{display.Density}|{paddingFactor:0.###}|{(hideNotificationIcons ? "ios" : "android")}");
 
     /// <summary>
     /// Reads the geometry straight from the frame: whatever the frame paints *inside* the screen outline near the top is
@@ -78,12 +78,14 @@ internal static class AndroidCutout
         int minStatusBar = (int)Math.Round(24 * display.Density / 160.0);
 
         string? path = null, rect = null;
+        Rectangle? cutout = null;
         int statusBar = minStatusBar;
         if (spans.Count >= 4)
         {
             int top = spans[0].Y, bottom = spans[^1].Y + 1;
             int minLeft = spans.Min(s => s.Left), maxRight = spans.Max(s => s.Right);
             double cx = screen.Width / 2.0;
+            cutout = new Rectangle((int)Math.Round(minLeft * sx), (int)Math.Round(top * sy), (int)Math.Round((maxRight - minLeft) * sx), (int)Math.Round((bottom - top) * sy));
 
             // Outline as a polygon: down the left side, back up the right. X is relative to the display centre, which is
             // what the framework's cutout spec expects when no @left/@right marker is given.
@@ -110,13 +112,14 @@ internal static class AndroidCutout
             statusBar = Math.Max(minStatusBar, (int)Math.Round((bottom + margin) * sy));
         }
 
-        return new Spec(path, rect, statusBar, (int)Math.Round(cornerExtent * 0.8), (int)Math.Round(cornerExtent * paddingFactor));
+        return new Spec(path, rect, statusBar, (int)Math.Round(cornerExtent * 0.8), (int)Math.Round(cornerExtent * paddingFactor), cutout);
     }
 
     private static string Num(double value) => value.ToString("0.#", CultureInfo.InvariantCulture);
 
     /// <summary>Builds both overlays, installs and enables them. Returns null on success, otherwise what went wrong.</summary>
-    public static string? Apply(MuMuInstance instance, Spec spec, string? sdkRoot)
+    /// <param name="hideNotificationIcons">For the iOS-style bar: no notification icons next to where its time is drawn.</param>
+    public static string? Apply(MuMuInstance instance, Spec spec, string? sdkRoot, bool hideNotificationIcons = false)
     {
         string? aapt2 = AndroidSdk.Newest("build-tools", "aapt2.exe", sdkRoot), zipalign = AndroidSdk.Newest("build-tools", "zipalign.exe", sdkRoot),
                 apksigner = AndroidSdk.Newest("build-tools", "apksigner.bat", sdkRoot), androidJar = AndroidSdk.Newest("platforms", "android.jar", sdkRoot);
@@ -142,6 +145,11 @@ internal static class AndroidCutout
         var systemUi = new StringBuilder();
         systemUi.AppendLine($"    <dimen name=\"status_bar_padding_start\">{spec.SidePadding}px</dimen>");
         systemUi.AppendLine($"    <dimen name=\"status_bar_padding_end\">{spec.SidePadding}px</dimen>");
+        if (hideNotificationIcons)
+        {
+            systemUi.AppendLine("    <integer name=\"max_notif_static_icons\">0</integer>");
+            systemUi.AppendLine("    <dimen name=\"overflow_dot_radius\">0px</dimen>"); // the "more notifications" dot
+        }
 
         string work = Path.Combine(Path.GetTempPath(), "MuMuDeviceFrames", Guid.NewGuid().ToString("N"));
         try
