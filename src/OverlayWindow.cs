@@ -17,6 +17,7 @@ internal sealed class OverlayWindow : NativeWindow
     public event Action? MenuRequested;
     public event Action? DoubleClicked;
     public bool IsAlive => Handle != IntPtr.Zero;
+    public bool IsVisible => _visible;
 
     public OverlayWindow(IntPtr emulator, bool interactive)
     {

@@ -31,6 +31,20 @@ internal static class Program
             return args.Length == 2 ? RunExpoCommand(args[1], ExpoAction.Reload) : TrayApp.RequestExpoActionOfRunningInstance(ExpoAction.Reload) ? 0 : 1;
         if (args.Length is 1 or 2 && args[0] == "--expo-gear")
             return args.Length == 2 ? RunExpoCommand(args[1], ExpoAction.ToggleGear) : TrayApp.RequestExpoActionOfRunningInstance(ExpoAction.ToggleGear) ? 0 : 1;
+        //   --record-frame [name]             record the whole visible frame with ShareX (active/last or named emulator)
+        if (args.Length is 1 or 2 && args[0] == "--record-frame")
+            return TrayApp.RequestFrameRecordingOfRunningInstance(args.Length == 2 ? args[1] : null) ? 0 : 1;
+        if (args.Length == 1 && args[0] == "--stop-frame-recording")
+        {
+            try
+            {
+                string? shareX = ShareXIntegration.FindCompatible(AppConfig.Load().ShareXExecutable);
+                if (shareX == null) return 1;
+                ShareXIntegration.Stop(shareX);
+                return 0;
+            }
+            catch (Exception ex) { Log.Write($"Could not stop ShareX recording: {ex}"); return 1; }
+        }
         if (args.Length >= 1 && args[0] == "--restore") { Restore(); return RestoreAndroid(); }
         //   --render <key> <w> <h> <out.png>   frame rendered for an arbitrary picture size (no emulator needed)
         if (args.Length >= 5 && args[0] == "--render" && int.TryParse(args[2], out int w) && int.TryParse(args[3], out int h))

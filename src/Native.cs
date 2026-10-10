@@ -13,6 +13,7 @@ internal static class Native
 
     public const int WM_NCDESTROY = 0x0082, WM_MOUSEACTIVATE = 0x0021, WM_MOUSEMOVE = 0x0200, WM_LBUTTONDOWN = 0x0201, WM_LBUTTONUP = 0x0202,
         WM_LBUTTONDBLCLK = 0x0203, WM_RBUTTONUP = 0x0205, WM_CAPTURECHANGED = 0x0215, WM_HOTKEY = 0x0312, WM_SYSCOMMAND = 0x0112;
+    public const int WM_COPYDATA = 0x004A;
     public const int MA_NOACTIVATE = 3;
     public const int SC_MINIMIZE = 0xF020;
 
@@ -35,6 +36,7 @@ internal static class Native
     }
 
     [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
+    [StructLayout(LayoutKind.Sequential)] public struct COPYDATASTRUCT { public IntPtr DataId; public int ByteCount; public IntPtr Data; }
     [StructLayout(LayoutKind.Sequential)] public struct SIZE { public int Cx, Cy; }
     [StructLayout(LayoutKind.Sequential, Pack = 1)] public struct BLENDFUNCTION { public byte BlendOp, BlendFlags, SourceConstantAlpha, AlphaFormat; }
 

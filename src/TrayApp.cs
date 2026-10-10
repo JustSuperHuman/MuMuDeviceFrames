@@ -32,7 +32,7 @@ internal sealed class TrayApp : ApplicationContext
         Config = AppConfig.Load();
         Library = FrameLibrary.Load(Config.FramesRoot);
 
-        _window = new HiddenWindow(OnHotkey, RunExpoAction, ExitThread);
+        _window = new HiddenWindow(OnHotkey, RunExpoAction, RecordFrameByName, ExitThread);
         RegisterHotkeys();
 
         _trayMenu.Opening += (_, _) => BuildMenu(_trayMenu, null);
@@ -190,7 +190,7 @@ internal sealed class TrayApp : ApplicationContext
     // Segoe Fluent Icons / MDL2 Assets code points.
     private const string PhoneGlyph = "\uE8EA", FrameGlyph = "\uEB9F", CopyGlyph = "\uE8C8", SaveGlyph = "\uE74E",
         RefreshGlyph = "\uE72C", GearGlyph = "\uE713", DownloadGlyph = "\uE896", FolderGlyph = "\uE838",
-        PowerGlyph = "\uE7E8", CloseAppsGlyph = "\uE8BB", MinimizeGlyph = "\uE921", DisplayGlyph = "\uE7F4", DevGlyph = "\uEC7A";
+        PowerGlyph = "\uE7E8", CloseAppsGlyph = "\uE8BB", MinimizeGlyph = "\uE921", DisplayGlyph = "\uE7F4", DevGlyph = "\uEC7A", VideoGlyph = "\uE714";
 
     private void BuildMenu(ContextMenuStrip menu, EmulatorSession? focus)
     {
@@ -264,6 +264,15 @@ internal sealed class TrayApp : ApplicationContext
             Config.Save();
             SyncAll();
         }));
+        if (ShareXIntegration.FindCompatible(Config.ShareXExecutable) != null)
+        {
+            var padding = new MenuItem("Recording padding", VideoGlyph) { Hint = $"{Math.Clamp(Config.RecordingPadding, 0, 500)} px" };
+            foreach (int amount in new[] { 0, 5, 10, 15, 20, 30, 50, 75, 100 })
+                padding.DropDownItems.Add(Check($"{amount} px", Config.RecordingPadding == amount, () => SetRecordingPadding(amount)));
+            padding.DropDownItems.Add(new MenuSeparator());
+            padding.DropDownItems.Add(new MenuItem("Custom…", null, PromptRecordingPadding));
+            items.Add(padding);
+        }
     }
 
     /// <summary>Housekeeping: frame downloads, config and startup.</summary>
@@ -301,6 +310,16 @@ internal sealed class TrayApp : ApplicationContext
                 $"Show/hide Expo dev menu gear  {Config.ExpoGearHotkey}".TrimEnd()),
             new Tile("Close apps", CloseAppsGlyph, MenuTiles.Red, MenuTiles.RedDark, () => CloseApps(session), connected,
                 "Close every app running in this emulator")));
+
+        if (ShareXIntegration.FindCompatible(Config.ShareXExecutable) != null)
+        {
+            items.Add(new MenuItem("Record entire frame", VideoGlyph, () => RecordFrame(session))
+            {
+                Enabled = session.Frame != null && Config.Enabled && instance.Enabled,
+                Hint = $"{Math.Clamp(Config.RecordingPadding, 0, 500)} px padding"
+            });
+            items.Add(new MenuItem("Stop recording", null, StopFrameRecording));
+        }
 
         items.Add(new MenuSeparator());
         var frames = new MenuItem("Frame", FrameGlyph) { Hint = session.Frame?.Model ?? "None" };
@@ -372,6 +391,101 @@ internal sealed class TrayApp : ApplicationContext
             Hint = cropped ? "Cropped now · restarts" : "Optional · restarts",
             HintTone = cropped ? HintTone.Caution : HintTone.Secondary,
         });
+    }
+
+    private void SetRecordingPadding(int padding)
+    {
+        Config.RecordingPadding = Math.Clamp(padding, 0, 500);
+        Config.Save();
+    }
+
+    private void PromptRecordingPadding()
+    {
+        using var dialog = new Form
+        {
+            Text = "Recording padding",
+            FormBorderStyle = FormBorderStyle.FixedDialog,
+            StartPosition = FormStartPosition.CenterScreen,
+            MaximizeBox = false,
+            MinimizeBox = false,
+            ShowInTaskbar = false,
+            AutoScaleMode = AutoScaleMode.Dpi,
+            ClientSize = new Size(290, 130)
+        };
+        dialog.Controls.Add(new Label { Text = "Pixels around the entire frame", Location = new Point(16, 15), AutoSize = true });
+        var value = new NumericUpDown { Minimum = 0, Maximum = 500, Value = Math.Clamp(Config.RecordingPadding, 0, 500), Location = new Point(16, 44), Width = 100 };
+        dialog.Controls.Add(value);
+        var cancel = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel, Location = new Point(103, 89), Width = 80 };
+        var save = new Button { Text = "Save", DialogResult = DialogResult.OK, Location = new Point(194, 89), Width = 80 };
+        dialog.Controls.Add(cancel);
+        dialog.Controls.Add(save);
+        dialog.AcceptButton = save;
+        dialog.CancelButton = cancel;
+        if (dialog.ShowDialog() == DialogResult.OK) SetRecordingPadding((int)value.Value);
+    }
+
+    private bool RecordFrameByName(string? name)
+    {
+        EmulatorSession? target = name == null ? SessionForWindow(GetForegroundWindow()) :
+            _sessions.Values.FirstOrDefault(session => string.Equals(session.Title, name, StringComparison.OrdinalIgnoreCase));
+        if (name == null && target == null && _sessions.TryGetValue(_lastActiveEmulator, out var last)) target = last;
+        if (name == null && target == null && Config.LastActiveEmulator is { } saved)
+            target = _sessions.Values.FirstOrDefault(session => string.Equals(session.Title, saved, StringComparison.OrdinalIgnoreCase));
+        if (name == null && target == null && _sessions.Count == 1) target = _sessions.Values.First();
+        if (target == null)
+        {
+            Log.Write($"Frame recording: emulator '{name ?? "active"}' not found");
+            return false;
+        }
+        RememberEmulator(target);
+        return RecordFrame(target);
+    }
+
+    private bool RecordFrame(EmulatorSession session)
+    {
+        string? shareX = ShareXIntegration.FindCompatible(Config.ShareXExecutable);
+        if (shareX == null)
+        {
+            Log.Write("Frame recording unavailable: compatible ShareX is not running or installed");
+            return false;
+        }
+        Rectangle? bounds = session.RecordingBounds(Config.RecordingPadding);
+        if (bounds == null)
+        {
+            Log.Write($"Frame recording unavailable: '{session.Title}' has no visible frame");
+            Notify("Show the full device frame before recording.", warning: true);
+            return false;
+        }
+        if (!Screen.AllScreens.Any(screen => screen.Bounds.Contains(bounds.Value)))
+        {
+            Log.Write($"Frame recording unavailable: '{session.Title}' bounds {bounds.Value} do not fit on one display");
+            Notify("Move the full frame and its padding onto one display before recording.", warning: true);
+            return false;
+        }
+        try
+        {
+            ShareXIntegration.Record(shareX, bounds.Value);
+            Log.Write($"Recording '{session.Title}' with ShareX at {bounds.Value}");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Log.Write($"ShareX recording failed: {ex}");
+            Notify($"Could not start recording: {ex.Message}", warning: true);
+            return false;
+        }
+    }
+
+    private void StopFrameRecording()
+    {
+        string? shareX = ShareXIntegration.FindCompatible(Config.ShareXExecutable);
+        if (shareX == null) return;
+        try { ShareXIntegration.Stop(shareX); }
+        catch (Exception ex)
+        {
+            Log.Write($"Could not stop ShareX recording: {ex}");
+            Notify($"Could not stop recording: {ex.Message}", warning: true);
+        }
     }
 
     private void SaveScreenshot(EmulatorSession session)
@@ -508,6 +622,8 @@ internal sealed class TrayApp : ApplicationContext
         Config.AndroidSdk = fresh.AndroidSdk; Config.StatusBarPaddingFactor = fresh.StatusBarPaddingFactor;
         Config.StatusBarClock = fresh.StatusBarClock; Config.StatusBarFont = fresh.StatusBarFont; Config.IosStatusBar = fresh.IosStatusBar;
         Config.LastActiveEmulator = fresh.LastActiveEmulator;
+        Config.RecordingPadding = fresh.RecordingPadding;
+        Config.ShareXExecutable = fresh.ShareXExecutable;
         bool interactiveChanged = Config.BezelInteractive != fresh.BezelInteractive;
         Config.BezelInteractive = fresh.BezelInteractive;
         if (Config.Hotkey != fresh.Hotkey || Config.ExpoReloadHotkey != fresh.ExpoReloadHotkey || Config.ExpoGearHotkey != fresh.ExpoGearHotkey)
@@ -733,6 +849,26 @@ internal sealed class TrayApp : ApplicationContext
             result != IntPtr.Zero;
     }
 
+    public static bool RequestFrameRecordingOfRunningInstance(string? name)
+    {
+        IntPtr hwnd = FindWindowW(null, HiddenWindow.WindowCaption);
+        if (hwnd == IntPtr.Zero || name is { Length: > 200 }) return false;
+        IntPtr data = System.Runtime.InteropServices.Marshal.StringToHGlobalUni(name ?? "");
+        IntPtr message = IntPtr.Zero;
+        try
+        {
+            var payload = new COPYDATASTRUCT { DataId = (IntPtr)1, ByteCount = ((name?.Length ?? 0) + 1) * sizeof(char), Data = data };
+            message = System.Runtime.InteropServices.Marshal.AllocHGlobal(System.Runtime.InteropServices.Marshal.SizeOf<COPYDATASTRUCT>());
+            System.Runtime.InteropServices.Marshal.StructureToPtr(payload, message, false);
+            return SendMessageTimeoutW(hwnd, WM_COPYDATA, IntPtr.Zero, message, SMTO_ABORTIFHUNG, 5000, out var result) != IntPtr.Zero && result != IntPtr.Zero;
+        }
+        finally
+        {
+            if (message != IntPtr.Zero) System.Runtime.InteropServices.Marshal.FreeHGlobal(message);
+            System.Runtime.InteropServices.Marshal.FreeHGlobal(data);
+        }
+    }
+
     /// <summary>Receives the hotkey and lends foreground status to the bezel context menu.</summary>
     private sealed class HiddenWindow : NativeWindow
     {
@@ -742,12 +878,14 @@ internal sealed class TrayApp : ApplicationContext
 
         private readonly Action<int> _onHotkey;
         private readonly Func<ExpoAction, bool> _onExpoAction;
+        private readonly Func<string?, bool> _onRecordFrame;
         private readonly Action _onExit;
 
-        public HiddenWindow(Action<int> onHotkey, Func<ExpoAction, bool> onExpoAction, Action onExit)
+        public HiddenWindow(Action<int> onHotkey, Func<ExpoAction, bool> onExpoAction, Func<string?, bool> onRecordFrame, Action onExit)
         {
             _onHotkey = onHotkey;
             _onExpoAction = onExpoAction;
+            _onRecordFrame = onRecordFrame;
             _onExit = onExit;
             CreateHandle(new CreateParams { Caption = WindowCaption, Style = unchecked((int)WS_POPUP), ExStyle = (int)WS_EX_TOOLWINDOW });
         }
@@ -758,6 +896,16 @@ internal sealed class TrayApp : ApplicationContext
             if (m.Msg == WM_EXIT_REQUEST) { _onExit(); return; }
             if (m.Msg == WM_EXPO_RELOAD) { m.Result = _onExpoAction(ExpoAction.Reload) ? (IntPtr)1 : IntPtr.Zero; return; }
             if (m.Msg == WM_EXPO_GEAR) { m.Result = _onExpoAction(ExpoAction.ToggleGear) ? (IntPtr)1 : IntPtr.Zero; return; }
+            if (m.Msg == WM_COPYDATA && m.LParam != IntPtr.Zero)
+            {
+                var data = System.Runtime.InteropServices.Marshal.PtrToStructure<COPYDATASTRUCT>(m.LParam);
+                if (data.DataId == (IntPtr)1 && data.Data != IntPtr.Zero && data.ByteCount is >= 2 and <= 402 && data.ByteCount % 2 == 0)
+                {
+                    string? name = System.Runtime.InteropServices.Marshal.PtrToStringUni(data.Data, data.ByteCount / 2 - 1);
+                    m.Result = _onRecordFrame(string.IsNullOrWhiteSpace(name) ? null : name) ? (IntPtr)1 : IntPtr.Zero;
+                }
+                return;
+            }
             base.WndProc(ref m);
         }
     }

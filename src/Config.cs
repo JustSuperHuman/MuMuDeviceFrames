@@ -56,6 +56,12 @@ internal sealed class AppConfig
     /// <summary>Last emulator brought to the front, used when an Expo hotkey runs from another app.</summary>
     public string? LastActiveEmulator { get; set; }
 
+    /// <summary>Extra desktop pixels around the entire rendered device frame in ShareX recordings.</summary>
+    public int RecordingPadding { get; set; } = 15;
+
+    /// <summary>Optional path to a compatible ShareX.exe when it is installed outside the usual locations.</summary>
+    public string? ShareXExecutable { get; set; }
+
     /// <summary>Android SDK folder (aapt2, zipalign, apksigner, android.jar) for building the cutout overlays. Null = ANDROID_HOME.</summary>
     public string? AndroidSdk { get; set; }
 

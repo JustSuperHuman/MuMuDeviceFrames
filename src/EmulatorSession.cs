@@ -35,6 +35,18 @@ internal sealed class EmulatorSession : IDisposable
     /// <summary>Title bar temporarily brought back (bezel double-click) without dropping the frame.</summary>
     public bool Peek { get; set; }
 
+    public Rectangle? RecordingBounds(int padding)
+    {
+        Sync();
+        if (_disposed || !_app.Config.Enabled || !_app.Config.Instance(Title).Enabled ||
+            _current == null || _overlay is not { IsAlive: true, IsVisible: true } || IsIconic(Main)) return null;
+
+        int inset = Math.Clamp(padding, 0, 500);
+        Point position = _overlay.Position;
+        return new Rectangle(position.X - inset, position.Y - inset,
+            _current.Width + inset * 2, _current.Height + inset * 2);
+    }
+
     public EmulatorSession(TrayApp app, IntPtr main, IntPtr render, uint pid, string title)
     {
         _app = app;

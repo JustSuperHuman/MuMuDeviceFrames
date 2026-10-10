@@ -50,7 +50,7 @@ For the Android matching (status bar/cutout) the tool needs the Android SDK buil
 | Action | Result |
 | --- | --- |
 | Drag the bezel | Moves the emulator (its title bar is hidden, so the bezel is the handle) |
-| Right-click the bezel | Menu for that emulator: Copy / Save / Reload / Dev gear tiles, then frame, Android display, minimize |
+| Right-click the bezel | Menu for that emulator: Copy / Save / Reload / Dev gear tiles, recording when compatible ShareX is installed, then frame, Android display, minimize |
 | Double-click the bezel | Peek: brings MuMu's title bar and toolbar back without dropping the frame; again to hide |
 | `Ctrl+Alt+F` | All frames off / on (off = emulators look exactly like stock MuMu) |
 | `Ctrl+Alt+R` | Reload the Expo app in the active or last active emulator |
@@ -68,6 +68,20 @@ crops the picture under the bezel — or use **Android display ▸ Set resolutio
 screen resolution into MuMu's settings (density scaled so the app layout keeps its size) and restarts that emulator.
 
 Landscape: when MuMu rotates its window, the frame rotates with it (phone top to the left).
+
+### Recording the full frame
+
+Install a compatible ShareX build with device frame recording support to show **Record entire frame** in each emulator menu. The command captures
+the visible frame and 15 pixels around it on every side. Change **Recording padding** in the tray settings, or set
+`RecordingPadding` in the config to any value from 0 to 500. Keep the full frame and padding on one display before starting.
+Use **Stop recording** in the same menu or ShareX's recording controls when you're done. ShareX then shows your video actions and compatible saved quick-task presets.
+The running tray app also accepts `MuMuDeviceFrames.exe --record-frame [emulator]` and
+`MuMuDeviceFrames.exe --stop-frame-recording` for hotkey tools. Omit the emulator name to use the active or last used one.
+
+These recordings keep the Windows pointer out of the video and save click positions with the video. Open the recording
+in ShareX's video editor and use **Phone tap** to show a brief touch and ripple at each click. The mode is selected
+automatically for recordings started from this menu. Export the edit to put the taps into the finished video.
+Use **Tap size**, **Brightness**, and **Impact** in the editor to make the ripple larger, brighter, or more dramatic.
 
 ### Making Android fit the frame
 
@@ -111,6 +125,8 @@ and the Android-matching switch are stored per emulator name. `log.txt` is next 
 | `ExpoReloadHotkey` | `Ctrl+Alt+R` | Reload the Expo app in the active or last active emulator; empty string disables it. |
 | `ExpoGearHotkey` | `Ctrl+Alt+G` | Show or hide Expo's floating gear there; empty string disables it. |
 | `LastActiveEmulator` | `null` | Last emulator used for Expo hotkeys when another app is in front. Updated automatically. |
+| `RecordingPadding` | `15` | Pixels to capture around every side of the full frame, from 0 to 500. |
+| `ShareXExecutable` | `null` | Optional path to a compatible ShareX.exe outside the usual install folders. |
 | `StatusBarPaddingFactor` | `0.5` | Status-bar side padding as a fraction of the frame's corner size |
 | `IosStatusBar` | `false` | iOS-style status bar on every emulator (per-emulator overrides live under `Instances`) |
 | `StatusBarClock` | `auto` | Time on the iOS-style bar: `auto`, `24h`, or fixed text like `9:41` |
