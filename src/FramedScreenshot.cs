@@ -18,10 +18,44 @@ internal static class FramedScreenshot
     {
         var png = instance.Screencap();
         if (png == null) return "adb screencap failed";
-        return Compose(frame, png, outPath, background, statusBar);
+        using var image = Compose(frame, png, background, statusBar);
+        image.Save(outPath, ImageFormat.Png);
+        return null;
     }
 
-    public static string? Compose(FrameInfo frame, byte[] screenshotPng, string outPath, string? background, StatusBar? statusBar = null)
+    /// <summary>
+    /// Puts the framed screenshot on the clipboard. Call on the UI (STA) thread with the bytes of <see cref="Png"/>.
+    /// Apps that keep transparency (Figma, Photoshop, browsers, Slack, Discord) read the "PNG" format; the plain bitmap
+    /// next to it is for everything else, on white because CF_DIB has no alpha and would turn the corners black.
+    /// </summary>
+    public static void CopyToClipboard(byte[] png)
+    {
+        using var image = new Bitmap(new MemoryStream(png));
+        using var flat = new Bitmap(image.Width, image.Height, PixelFormat.Format24bppRgb);
+        using (var g = Graphics.FromImage(flat))
+        {
+            g.Clear(Color.White);
+            g.DrawImageUnscaled(image, 0, 0);
+        }
+        var data = new DataObject();
+        data.SetData("PNG", false, new MemoryStream(png));
+        data.SetData(DataFormats.Bitmap, true, flat);
+        Clipboard.SetDataObject(data, true, 5, 100);
+    }
+
+    /// <summary>The framed screenshot as PNG bytes (transparent around the phone); null with an error if the capture failed.</summary>
+    public static byte[]? Png(MuMuInstance instance, FrameInfo frame, StatusBar? statusBar, out string? error)
+    {
+        error = null;
+        var png = instance.Screencap();
+        if (png == null) { error = "adb screencap failed"; return null; }
+        using var image = Compose(frame, png, null, statusBar);
+        using var stream = new MemoryStream();
+        image.Save(stream, ImageFormat.Png);
+        return stream.ToArray();
+    }
+
+    public static Bitmap Compose(FrameInfo frame, byte[] screenshotPng, string? background, StatusBar? statusBar = null)
     {
         var source = FrameSource.Load(frame);
         var screen = source.Screen;
@@ -89,7 +123,6 @@ internal static class FramedScreenshot
             canvas[p + 3] = (byte)(a + canvas[p + 3] * (255 - a) / 255);
         }
 
-        Diagnostics.SavePremultiplied(canvas, width, height, outPath);
-        return null;
+        return Diagnostics.ToBitmap(canvas, width, height);
     }
 }

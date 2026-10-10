@@ -21,8 +21,10 @@ was nothing like it.
 - **Android knows about the frame.** A stock emulator lays itself out as a plain rectangle, so the clock slides under the
   rounded corners and app headers sit beneath the Dynamic Island. One click gives the emulator the frame's real display
   cutout, status-bar height and corner radius, so apps get the same safe-area insets as on the physical phone.
-- **Pixel-perfect screenshots.** "Save framed screenshot" takes the shot inside Android and composites it into the frame
-  at native resolution (1520 × 3068 for a 17 Pro Max), whatever is covering the emulator window.
+- **Pixel-perfect screenshots.** The **Save** tile at the top of the bezel menu takes the shot inside Android and composites it into the frame
+  at native resolution (1520 × 3068 for a 17 Pro Max), whatever is covering the emulator window. **Copy**
+  puts the same PNG, transparent corners included, straight on the clipboard for Figma, Photoshop, Slack
+  or a chat window.
 - **145 frames** from the open [device-frames-media](https://github.com/jonnyjackson26/device-frames-media) set —
   iPhone 6s to 17 Pro Max, iPhone Air, Pixel 8/9, Galaxy S21, iPads, Apple Watch — downloaded on first run.
 
@@ -48,14 +50,21 @@ For the Android matching (status bar/cutout) the tool needs the Android SDK buil
 | Action | Result |
 | --- | --- |
 | Drag the bezel | Moves the emulator (its title bar is hidden, so the bezel is the handle) |
-| Right-click the bezel | Menu for that emulator: frame, Android matching, screenshot, minimize |
+| Right-click the bezel | Menu for that emulator: Copy / Save / Reload / Dev gear tiles, then frame, Android display, minimize |
 | Double-click the bezel | Peek: brings MuMu's title bar and toolbar back without dropping the frame; again to hide |
 | `Ctrl+Alt+F` | All frames off / on (off = emulators look exactly like stock MuMu) |
+| `Ctrl+Alt+R` | Reload the Expo app in the active or last active emulator |
+| `Ctrl+Alt+G` | Show or hide Expo's floating gear in that emulator |
 | Tray icon | Same menus for every emulator, default frame, frame download, Start with Windows, exit |
 
-Frame menus mark each model `● exact fit` / `○ near fit` for that emulator's picture. A frame whose screen aspect is
+The Expo actions are also in each emulator's bezel and tray menus. They work when an Expo development app is in front
+inside that emulator. With several emulators open, click the one you want before using a hotkey. External hotkey tools
+can run `MuMuDeviceFrames.exe --expo-reload` or `MuMuDeviceFrames.exe --expo-gear` while the tray app is running. Add an
+emulator name, such as `--expo-reload JG-2`, to target one directly.
+
+Frame menus mark each model **Exact fit** / **Near fit** for that emulator's picture. A frame whose screen aspect is
 within 1.5 % of the emulator's is stretched to fit exactly (invisible); anything further off keeps its proportions and
-crops the picture under the bezel — or use **Set display to W×H for this frame**, which writes the frame's exact
+crops the picture under the bezel — or use **Android display ▸ Set resolution to W×H**, which writes the frame's exact
 screen resolution into MuMu's settings (density scaled so the app layout keeps its size) and restarts that emulator.
 
 Landscape: when MuMu rotates its window, the frame rotates with it (phone top to the left).
@@ -68,7 +77,7 @@ corner radius and status-bar side padding. It follows frame changes automaticall
 emulator restarts, and unticking it uninstalls everything. `StatusBarPaddingFactor` in the config moves the clock and
 icons further in or out.
 
-**iOS-style status bar on all emulators** (tray menu, or `IosStatusBar` in the config) applies to every emulator as it
+**iOS-style status bar** in the tray menu (or `IosStatusBar` in the config) applies to every emulator as it
 starts; the bezel menu can override it for one emulator. It turns on the cutout matching above by itself, empties
 Android's status bar through SystemUI's icon blocklist (`settings put secure icon_blacklist …`) and the SystemUI overlay
 (no notification icons, overflow dot or clock — Android 15's clock ignores the blocklist), then draws
@@ -99,6 +108,9 @@ and the Android-matching switch are stored per emulator name. `log.txt` is next 
 | `Overlap` | `1` | Pixels the bezel overlaps the picture, so its anti-aliased edge blends with app content |
 | `BezelInteractive` | `true` | `false` makes the frame fully click-through |
 | `Hotkey` | `Ctrl+Alt+F` | |
+| `ExpoReloadHotkey` | `Ctrl+Alt+R` | Reload the Expo app in the active or last active emulator; empty string disables it. |
+| `ExpoGearHotkey` | `Ctrl+Alt+G` | Show or hide Expo's floating gear there; empty string disables it. |
+| `LastActiveEmulator` | `null` | Last emulator used for Expo hotkeys when another app is in front. Updated automatically. |
 | `StatusBarPaddingFactor` | `0.5` | Status-bar side padding as a fraction of the frame's corner size |
 | `IosStatusBar` | `false` | iOS-style status bar on every emulator (per-emulator overrides live under `Instances`) |
 | `StatusBarClock` | `auto` | Time on the iOS-style bar: `auto`, `24h`, or fixed text like `9:41` |
@@ -106,7 +118,7 @@ and the Android-matching switch are stored per emulator name. `log.txt` is next 
 | `AndroidSdk` | `null` (`ANDROID_HOME`) | SDK folder for the overlays |
 | `ProcessNames` | `MuMuNxDevice, MuMuPlayer, NemuPlayer` | Emulator executables to attach to |
 
-Command line: `--exit` (quit the running instance cleanly) · `--startup on|off` (start with Windows) · `--restore` (un-clip all emulator windows; only needed if
+Command line: `--exit` (quit the running instance cleanly) · `--expo-reload [emulator]` / `--expo-gear [emulator]` (Expo actions; omit the name to use the running tray app) · `--startup on|off` (start with Windows) · `--restore` (un-clip all emulator windows; only needed if
 the app was killed — starting it again does the same) · `--download [folder]` (fetch the frame set) ·
 `--screenshot <emulator> <out.png> [frame] [transparent|checker|#RRGGBB]` (framed screenshot at native resolution) ·
 `--snapshot <emulator> <out.png> [frame|-] [background]` (composite of the window and the frame, for checking

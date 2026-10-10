@@ -47,6 +47,15 @@ internal sealed class AppConfig
     /// <summary>Toggles all frames (gives the MuMu title bar and toolbar back while off).</summary>
     public string Hotkey { get; set; } = "Ctrl+Alt+F";
 
+    /// <summary>Reloads the Expo app in the last active emulator. Empty disables the hotkey.</summary>
+    public string ExpoReloadHotkey { get; set; } = "Ctrl+Alt+R";
+
+    /// <summary>Shows or hides Expo's floating tools button in the last active emulator. Empty disables the hotkey.</summary>
+    public string ExpoGearHotkey { get; set; } = "Ctrl+Alt+G";
+
+    /// <summary>Last emulator brought to the front, used when an Expo hotkey runs from another app.</summary>
+    public string? LastActiveEmulator { get; set; }
+
     /// <summary>Android SDK folder (aapt2, zipalign, apksigner, android.jar) for building the cutout overlays. Null = ANDROID_HOME.</summary>
     public string? AndroidSdk { get; set; }
 

@@ -26,6 +26,11 @@ internal static class Program
         if (args.Length >= 2 && args[0] == "--startup") { Startup.Set(args[1] == "on"); return 0; }
         //   --exit                             ask the running instance to quit cleanly
         if (args.Length >= 1 && args[0] == "--exit") return TrayApp.RequestExitOfRunningInstance() ? 0 : 1;
+        //   --expo-reload / --expo-gear [name] run an Expo action on the active or named emulator
+        if (args.Length is 1 or 2 && args[0] == "--expo-reload")
+            return args.Length == 2 ? RunExpoCommand(args[1], ExpoAction.Reload) : TrayApp.RequestExpoActionOfRunningInstance(ExpoAction.Reload) ? 0 : 1;
+        if (args.Length is 1 or 2 && args[0] == "--expo-gear")
+            return args.Length == 2 ? RunExpoCommand(args[1], ExpoAction.ToggleGear) : TrayApp.RequestExpoActionOfRunningInstance(ExpoAction.ToggleGear) ? 0 : 1;
         if (args.Length >= 1 && args[0] == "--restore") { Restore(); return RestoreAndroid(); }
         //   --render <key> <w> <h> <out.png>   frame rendered for an arbitrary picture size (no emulator needed)
         if (args.Length >= 5 && args[0] == "--render" && int.TryParse(args[2], out int w) && int.TryParse(args[3], out int h))
@@ -94,6 +99,24 @@ internal static class Program
         }, IntPtr.Zero);
         Log.Write($"Restore: cleared clip region on {count} emulator window(s)");
         return 0;
+    }
+
+    private static int RunExpoCommand(string name, ExpoAction action)
+    {
+        try
+        {
+            var instance = MuMuControl.LocateByName(name);
+            var result = instance == null
+                ? new ExpoResult(false, $"Could not find emulator '{name}'.")
+                : ExpoControl.Run(instance, action);
+            Log.Write($"Expo {action} on '{name}': {result.Message}");
+            return result.Success ? 0 : 1;
+        }
+        catch (Exception ex)
+        {
+            Log.Write($"Expo {action} on '{name}' failed: {ex}");
+            return 1;
+        }
     }
 
     /// <summary>Brings back the Android status bar on every running instance whose bar this tool hid (after a crash/kill).</summary>

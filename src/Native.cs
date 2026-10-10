@@ -16,7 +16,7 @@ internal static class Native
     public const int MA_NOACTIVATE = 3;
     public const int SC_MINIMIZE = 0xF020;
 
-    public const uint EVENT_SYSTEM_MINIMIZESTART = 0x0016, EVENT_SYSTEM_MINIMIZEEND = 0x0017;
+    public const uint EVENT_SYSTEM_FOREGROUND = 0x0003, EVENT_SYSTEM_MINIMIZESTART = 0x0016, EVENT_SYSTEM_MINIMIZEEND = 0x0017;
     public const uint EVENT_OBJECT_DESTROY = 0x8001, EVENT_OBJECT_SHOW = 0x8002, EVENT_OBJECT_HIDE = 0x8003, EVENT_OBJECT_LOCATIONCHANGE = 0x800B;
     public const uint WINEVENT_OUTOFCONTEXT = 0x0000, WINEVENT_SKIPOWNPROCESS = 0x0002;
 
@@ -24,6 +24,7 @@ internal static class Native
     public const uint PW_RENDERFULLCONTENT = 0x00000002;
     public const uint MONITOR_DEFAULTTONEAREST = 2;
     public const uint MOD_ALT = 1, MOD_CONTROL = 2, MOD_SHIFT = 4, MOD_WIN = 8, MOD_NOREPEAT = 0x4000;
+    public const uint SMTO_ABORTIFHUNG = 0x0002;
 
     [StructLayout(LayoutKind.Sequential)]
     public struct RECT
@@ -75,6 +76,8 @@ internal static class Native
     [DllImport("user32.dll")] public static extern IntPtr SetCapture(IntPtr hwnd);
     [DllImport("user32.dll")] public static extern bool ReleaseCapture();
     [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT pt);
+    [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr hwnd, uint flags);
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hwnd);
     [DllImport("user32.dll")] public static extern bool RegisterHotKey(IntPtr hwnd, int id, uint mods, uint vk);
     [DllImport("user32.dll")] public static extern bool UnregisterHotKey(IntPtr hwnd, int id);
@@ -82,6 +85,7 @@ internal static class Native
     [DllImport("user32.dll")] public static extern bool GetMonitorInfoW(IntPtr monitor, ref MONITORINFO info);
     [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr hwnd, IntPtr dc, uint flags);
     [DllImport("user32.dll")] public static extern bool PostMessageW(IntPtr hwnd, int msg, IntPtr w, IntPtr l);
+    [DllImport("user32.dll", SetLastError = true)] public static extern IntPtr SendMessageTimeoutW(IntPtr hwnd, int msg, IntPtr w, IntPtr l, uint flags, uint timeoutMs, out IntPtr result);
     [DllImport("user32.dll")] public static extern bool DestroyIcon(IntPtr icon);
 
     [DllImport("gdi32.dll")] public static extern IntPtr CreateCompatibleDC(IntPtr dc);

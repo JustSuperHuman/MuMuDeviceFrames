@@ -4,10 +4,10 @@ using static MuMuDeviceFrames.Native;
 
 namespace MuMuDeviceFrames;
 
-/// <summary>Tray icon, emulator discovery, menus and the global hotkey.</summary>
+/// <summary>Tray icon, emulator discovery, menus and global hotkeys.</summary>
 internal sealed class TrayApp : ApplicationContext
 {
-    private const int HotkeyId = 1;
+    private const int FramesHotkeyId = 1, ExpoReloadHotkeyId = 2, ExpoGearHotkeyId = 3;
 
     private readonly NotifyIcon _tray;
     private readonly ContextMenuStrip _trayMenu = new();
@@ -17,6 +17,10 @@ internal sealed class TrayApp : ApplicationContext
     private readonly SynchronizationContext _ui;
     private readonly Dictionary<IntPtr, EmulatorSession> _sessions = [];
     private readonly Dictionary<uint, bool> _pidIsEmulator = [];
+    private readonly HashSet<uint> _expoBusy = [];
+    private readonly WinEventProc _foregroundChanged;
+    private readonly IntPtr _foregroundHook;
+    private IntPtr _lastActiveEmulator;
     private Icon? _icon;
 
     public AppConfig Config { get; }
@@ -28,8 +32,8 @@ internal sealed class TrayApp : ApplicationContext
         Config = AppConfig.Load();
         Library = FrameLibrary.Load(Config.FramesRoot);
 
-        _window = new HiddenWindow(ToggleAll, ExitThread);
-        RegisterHotkey();
+        _window = new HiddenWindow(OnHotkey, RunExpoAction, ExitThread);
+        RegisterHotkeys();
 
         _trayMenu.Opening += (_, _) => BuildMenu(_trayMenu, null);
         _icon = LoadIcon() ?? CreateIcon();
@@ -40,6 +44,10 @@ internal sealed class TrayApp : ApplicationContext
         _scanTimer.Tick += (_, _) => Scan();
         _scanTimer.Start();
         Scan();
+        _foregroundChanged = (_, _, hwnd, _, _, _, _) => TrackActiveEmulator(hwnd);
+        _foregroundHook = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, IntPtr.Zero,
+            _foregroundChanged, 0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
+        if (_foregroundHook == IntPtr.Zero) Log.Write("Could not monitor the active emulator window");
 
         if (!File.Exists(AppConfig.FilePath)) Config.Save();
         Startup.Refresh();
@@ -131,6 +139,8 @@ internal sealed class TrayApp : ApplicationContext
             session.Sync();
         }
 
+        TrackActiveEmulator(GetForegroundWindow());
+
         if (_pidIsEmulator.Count > 512) _pidIsEmulator.Clear();
     }
 
@@ -170,100 +180,156 @@ internal sealed class TrayApp : ApplicationContext
 
     public void ShowSessionMenu(EmulatorSession session)
     {
+        RememberEmulator(session);
         BuildMenu(_sessionMenu, session);
         // A menu opened from a no-activate window only closes on outside clicks if one of our windows is foreground.
         SetForegroundWindow(_window.Handle);
         _sessionMenu.Show(Cursor.Position);
     }
 
+    // Segoe Fluent Icons / MDL2 Assets code points.
+    private const string PhoneGlyph = "\uE8EA", FrameGlyph = "\uEB9F", CopyGlyph = "\uE8C8", SaveGlyph = "\uE74E",
+        RefreshGlyph = "\uE72C", GearGlyph = "\uE713", DownloadGlyph = "\uE896", FolderGlyph = "\uE838",
+        PowerGlyph = "\uE7E8", CloseAppsGlyph = "\uE8BB", MinimizeGlyph = "\uE921", DisplayGlyph = "\uE7F4", DevGlyph = "\uEC7A";
+
     private void BuildMenu(ContextMenuStrip menu, EmulatorSession? focus)
     {
         menu.Items.Clear();
+        var items = menu.Items;
 
         if (focus != null)
         {
-            AddSessionItems(menu.Items, focus);
-            menu.Items.Add(new ToolStripSeparator());
+            // Bezel menu: this emulator's actions first, app-wide settings tucked into the last submenu.
+            items.Add(new MenuTitle(focus.Title, Describe(focus.Frame) ?? "No frame", PhoneGlyph));
+            items.Add(new MenuSeparator());
+            AddSessionItems(items, focus);
+            items.Add(new MenuSeparator());
+            items.Add(FramesEnabledItem());
+            var app = new MenuItem("MuMu Device Frames", GearGlyph);
+            AddGlobalItems(app.DropDownItems);
+            app.DropDownItems.Add(new MenuSeparator());
+            AddAppItems(app.DropDownItems);
+            app.DropDownItems.Add(new MenuSeparator());
+            app.DropDownItems.Add(ExitItem());
+            items.Add(app);
+        }
+        else
+        {
+            string running = _sessions.Count switch { 0 => "No emulators running", 1 => "1 emulator running", var n => $"{n} emulators running" };
+            items.Add(new MenuTitle("MuMu Device Frames", running, PhoneGlyph));
+            items.Add(new MenuSeparator());
+            items.Add(FramesEnabledItem());
+            items.Add(new MenuSeparator());
+            if (_sessions.Count == 0) items.Add(new MenuItem("Start a MuMu emulator to frame it") { Enabled = false });
+            foreach (var session in _sessions.Values.OrderBy(s => s.Title, StringComparer.OrdinalIgnoreCase))
+            {
+                var item = new MenuItem(session.Title, PhoneGlyph) { Hint = session.Frame?.Model ?? "No frame" };
+                AddSessionItems(item.DropDownItems, session);
+                items.Add(item);
+            }
+            items.Add(new MenuSeparator());
+            AddGlobalItems(items);
+            items.Add(new MenuSeparator());
+            var settings = new MenuItem("Settings", GearGlyph);
+            AddAppItems(settings.DropDownItems);
+            items.Add(settings);
+            items.Add(ExitItem());
         }
 
-        menu.Items.Add(Check($"Frames enabled  ({Config.Hotkey})", Config.Enabled, ToggleAll));
-        menu.Items.Add(Check("iOS-style status bar on all emulators", Config.IosStatusBar, () =>
+        MenuStyle.Apply(menu);
+    }
+
+    private MenuItem FramesEnabledItem() => Check("Show device frames", Config.Enabled, ToggleAll, hint: Config.Hotkey);
+
+    private MenuItem ExitItem() => new("Exit", PowerGlyph, ExitThread) { Hint = "Restores emulators" };
+
+    /// <summary>Settings that apply to every emulator.</summary>
+    private void AddGlobalItems(ToolStripItemCollection items)
+    {
+        var defaults = new MenuItem("Default frame", FrameGlyph) { Hint = Library.Find(Config.DefaultFrame)?.Model ?? "Automatic" };
+        defaults.DropDownItems.Add(Check("Automatic", Config.DefaultFrame == null, () => SetDefaultFrame(null), hint: "Best aspect-ratio match"));
+        defaults.DropDownItems.Add(new MenuSeparator());
+        AddFrameTree(defaults.DropDownItems, Config.DefaultFrame, null, f => SetDefaultFrame(f.Key));
+        items.Add(defaults);
+        items.Add(Check("iOS-style status bar", Config.IosStatusBar, () =>
         {
             Config.IosStatusBar = !Config.IosStatusBar;
             foreach (var inst in Config.Instances.Values) inst.IosStatusBar = null; // global switch wins everywhere
             Config.Save();
             SyncAll();
         }));
-        menu.Items.Add(Check("Hide emulator title bar (clip to screen)", Config.ClipToScreen, () =>
+        items.Add(Check("Hide emulator title bar", Config.ClipToScreen, () =>
         {
             Config.ClipToScreen = !Config.ClipToScreen;
             Config.Save();
             SyncAll();
         }));
+    }
 
-        if (focus == null)
-        {
-            menu.Items.Add(new ToolStripSeparator());
-            if (_sessions.Count == 0) menu.Items.Add(new ToolStripMenuItem("No running MuMu emulators") { Enabled = false });
-            foreach (var session in _sessions.Values.OrderBy(s => s.Title, StringComparer.OrdinalIgnoreCase))
-            {
-                var item = new ToolStripMenuItem($"{session.Title}   —   {Describe(session.Frame)}");
-                AddSessionItems(item.DropDownItems, session);
-                menu.Items.Add(item);
-            }
-        }
-
-        menu.Items.Add(new ToolStripSeparator());
-        var defaults = new ToolStripMenuItem($"Default frame   —   {Describe(Library.Find(Config.DefaultFrame)) ?? "best match"}");
-        defaults.DropDownItems.Add(Check("Automatic (best aspect-ratio match)", Config.DefaultFrame == null, () => SetDefaultFrame(null)));
-        defaults.DropDownItems.Add(new ToolStripSeparator());
-        AddFrameTree(defaults.DropDownItems, Config.DefaultFrame, null, f => SetDefaultFrame(f.Key));
-        menu.Items.Add(defaults);
-
-        menu.Items.Add(new ToolStripMenuItem(Library.Frames.Count == 0 ? "Download device frames (~35 MB)…" : "Update device frames from device-frames-media", null, (_, _) => DownloadFrames()) { Enabled = !_downloading });
-        menu.Items.Add(new ToolStripMenuItem("Reload frames and config", null, (_, _) => Reload()));
-        menu.Items.Add(Check("Start with Windows", Startup.IsEnabled, () =>
-        {
-            try { Startup.Set(!Startup.IsEnabled); }
-            catch (Exception ex) { Notify($"Could not change Start with Windows: {ex.Message}", warning: true); }
-        }));
-        menu.Items.Add(new ToolStripMenuItem("Open config folder", null, (_, _) =>
+    /// <summary>Housekeeping: frame downloads, config and startup.</summary>
+    private void AddAppItems(ToolStripItemCollection items)
+    {
+        items.Add(Library.Frames.Count == 0
+            ? new MenuItem("Download device frames…", DownloadGlyph, DownloadFrames) { Hint = "~35 MB", Enabled = !_downloading }
+            : new MenuItem("Update device frames", DownloadGlyph, DownloadFrames) { Hint = $"{Library.Frames.Count} installed", Enabled = !_downloading });
+        items.Add(new MenuItem("Reload frames and config", RefreshGlyph, Reload));
+        items.Add(new MenuItem("Open config folder", FolderGlyph, () =>
         {
             Config.Save();
             Process.Start(new ProcessStartInfo("explorer.exe", $"\"{AppConfig.Dir}\"") { UseShellExecute = true });
         }));
-        menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add(new ToolStripMenuItem("Exit (restores emulator windows)", null, (_, _) => ExitThread()));
+        items.Add(Check("Start with Windows", Startup.IsEnabled, () =>
+        {
+            try { Startup.Set(!Startup.IsEnabled); }
+            catch (Exception ex) { Notify($"Could not change Start with Windows: {ex.Message}", warning: true); }
+        }));
     }
 
     private void AddSessionItems(ToolStripItemCollection items, EmulatorSession session)
     {
         var instance = Config.Instance(session.Title);
-        items.Add(new ToolStripMenuItem($"{session.Title}   —   {Describe(session.Frame) ?? "no frame"}") { Enabled = false });
+        bool connected = session.Instance != null;
 
-        var frames = new ToolStripMenuItem("Frame");
+        // Everyday actions sit at the top, one click away.
+        bool canShoot = connected && session.Frame != null;
+        items.Add(new MenuTiles(
+            new Tile("Copy", CopyGlyph, MenuTiles.Blue, MenuTiles.BlueDark, () => CopyScreenshot(session), canShoot, "Copy framed screenshot"),
+            new Tile("Save", SaveGlyph, MenuTiles.Green, MenuTiles.GreenDark, () => SaveScreenshot(session), canShoot, "Save framed screenshot as PNG"),
+            new Tile("Reload", RefreshGlyph, MenuTiles.Orange, MenuTiles.OrangeDark, () => RunExpoAction(ExpoAction.Reload, session), connected,
+                $"Reload Expo app  {Config.ExpoReloadHotkey}".TrimEnd()),
+            new Tile("Dev gear", DevGlyph, MenuTiles.Purple, MenuTiles.PurpleDark, () => RunExpoAction(ExpoAction.ToggleGear, session), connected,
+                $"Show/hide Expo dev menu gear  {Config.ExpoGearHotkey}".TrimEnd()),
+            new Tile("Close apps", CloseAppsGlyph, MenuTiles.Red, MenuTiles.RedDark, () => CloseApps(session), connected,
+                "Close every app running in this emulator")));
+
+        items.Add(new MenuSeparator());
+        var frames = new MenuItem("Frame", FrameGlyph) { Hint = session.Frame?.Model ?? "None" };
         frames.DropDownItems.Add(Check("Use default frame", instance.Frame == null, () => SetInstanceFrame(session, null)));
-        frames.DropDownItems.Add(new ToolStripSeparator());
+        frames.DropDownItems.Add(new MenuSeparator());
         AddFrameTree(frames.DropDownItems, instance.Frame ?? session.Frame?.Key, session.RenderSize, f => SetInstanceFrame(session, f.Key));
         items.Add(frames);
-
-        items.Add(Check("Show frame on this emulator", instance.Enabled, () =>
+        items.Add(Check("Show frame", instance.Enabled, () =>
         {
             instance.Enabled = !instance.Enabled;
             Config.Save();
             session.Sync();
         }));
-        items.Add(Check("Peek at MuMu title bar  (double-click bezel)", session.Peek, () =>
+        items.Add(Check("Peek at title bar", session.Peek, () =>
         {
             session.Peek = !session.Peek;
             session.Sync();
-        }));
-        items.Add(new ToolStripMenuItem("Minimize emulator", null, (_, _) => PostMessageW(session.Main, WM_SYSCOMMAND, (IntPtr)SC_MINIMIZE, IntPtr.Zero)));
-        items.Add(new ToolStripMenuItem("Save framed screenshot (PNG)…", null, (_, _) => SaveScreenshot(session)) { Enabled = session.Instance != null && session.Frame != null });
+        }, hint: "Double-click bezel"));
 
         // Android side of the fit: status bar / cutout, and the display resolution.
-        items.Add(new ToolStripSeparator());
-        items.Add(Check("Match Android status bar and cutout to frame", instance.MatchAndroidCutout, () =>
+        var android = new MenuItem("Android display", DisplayGlyph);
+        AddAndroidItems(android.DropDownItems, session, instance, connected);
+        items.Add(android);
+        items.Add(new MenuItem("Minimize", MinimizeGlyph, () => PostMessageW(session.Main, WM_SYSCOMMAND, (IntPtr)SC_MINIMIZE, IntPtr.Zero)));
+    }
+
+    private void AddAndroidItems(ToolStripItemCollection items, EmulatorSession session, InstanceConfig instance, bool connected)
+    {
+        items.Add(Check("Match status bar and cutout to frame", instance.MatchAndroidCutout, () =>
         {
             instance.MatchAndroidCutout = !instance.MatchAndroidCutout;
             Config.Save();
@@ -272,41 +338,40 @@ internal sealed class TrayApp : ApplicationContext
         }));
 
         bool iosOn = Config.IosStatusBarFor(session.Title);
-        string iosLabel = instance.IosStatusBar == null ? "iOS-style status bar on this emulator  (following global)" : "iOS-style status bar on this emulator";
-        var iosBar = Check(iosLabel, iosOn, () =>
+        var iosBar = Check("iOS-style status bar", iosOn, () =>
         {
             // An explicit choice here overrides the global switch; matching the global value clears the override.
             bool next = !iosOn;
             instance.IosStatusBar = next == Config.IosStatusBar ? null : next;
             Config.Save();
             session.Sync();
-        });
-        iosBar.Enabled = session.Instance != null;
+        }, hint: instance.IosStatusBar == null ? "Following global" : "This emulator only");
+        iosBar.Enabled = connected;
         items.Add(iosBar);
 
-        if (session is { Display: { } display, Frame: { } frame })
+        if (session is not { Display: { } display, Frame: { } frame }) return;
+        items.Add(new MenuSeparator());
+        var target = frame.Screen.Size;
+        if (target == display.Native)
         {
-            var target = frame.Screen.Size;
-            if (target == display.Native)
-            {
-                items.Add(new ToolStripMenuItem($"Display {display.Native.Width}×{display.Native.Height} is this frame's exact screen size") { Enabled = false });
-            }
-            else
-            {
-                bool cropped = frame.Mismatch(display.Native.Width, display.Native.Height) > FrameLibrary.StretchTolerance;
-                string why = cropped ? "currently cropped to fit" : "same shape, optional";
-                items.Add(new ToolStripMenuItem($"Set display to {target.Width}×{target.Height} for this frame  ({why}; restarts {session.Title})", null, (_, _) =>
-                {
-                    int dpi = session.DensityFor(target);
-                    var answer = MessageBox.Show(
-                        $"Set {session.Title} to {target.Width}×{target.Height} at {dpi} dpi and restart it now?\n\n" +
-                        $"Currently {display.Native.Width}×{display.Native.Height} at {display.Density} dpi. The new density keeps your app's layout the same size. " +
-                        "Anything unsaved inside the emulator is lost by the restart.",
-                        "MuMu Device Frames", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning);
-                    if (answer == DialogResult.OK) session.SetDisplayToFrame();
-                }));
-            }
+            items.Add(new MenuItem("Resolution matches frame") { Hint = $"{target.Width}×{target.Height}", Enabled = false });
+            return;
         }
+        bool cropped = frame.Mismatch(display.Native.Width, display.Native.Height) > FrameLibrary.StretchTolerance;
+        items.Add(new MenuItem($"Set resolution to {target.Width}×{target.Height}…", null, () =>
+        {
+            int dpi = session.DensityFor(target);
+            var answer = MessageBox.Show(
+                $"Set {session.Title} to {target.Width}×{target.Height} at {dpi} dpi and restart it now?\n\n" +
+                $"Currently {display.Native.Width}×{display.Native.Height} at {display.Density} dpi. The new density keeps your app's layout the same size. " +
+                "Anything unsaved inside the emulator is lost by the restart.",
+                "MuMu Device Frames", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning);
+            if (answer == DialogResult.OK) session.SetDisplayToFrame();
+        })
+        {
+            Hint = cropped ? "Cropped now · restarts" : "Optional · restarts",
+            HintTone = cropped ? HintTone.Caution : HintTone.Secondary,
+        });
     }
 
     private void SaveScreenshot(EmulatorSession session)
@@ -330,24 +395,79 @@ internal sealed class TrayApp : ApplicationContext
         });
     }
 
+    private void CopyScreenshot(EmulatorSession session)
+    {
+        if (session.Instance is not { } instance || session.Frame is not { } frame) return;
+        string title = session.Title;
+        var bar = session.StatusBarForScreenshot() is { } s ? new FramedScreenshot.StatusBar(s.Layout, s.Dark, s.Time, IosStatusBar.Family(Config.StatusBarFont)) : null;
+        Task.Run(() =>
+        {
+            string? error;
+            byte[]? png = null;
+            try { png = FramedScreenshot.Png(instance, frame, bar, out error); }
+            catch (Exception ex) { error = ex.Message; }
+            // The clipboard is only reachable from the UI (STA) thread.
+            Post(() =>
+            {
+                if (png != null)
+                {
+                    try { FramedScreenshot.CopyToClipboard(png); }
+                    catch (Exception ex) { error = $"clipboard is busy ({ex.Message})"; }
+                }
+                Notify(error == null ? $"Copied {title} in {frame.Model} — paste it anywhere" : $"Screenshot failed: {error}", error != null);
+            });
+        });
+    }
+
+    private void CloseApps(EmulatorSession session)
+    {
+        if (session.Instance is not { } instance) return;
+        string title = session.Title;
+        Task.Run(() =>
+        {
+            string message;
+            bool ok = true;
+            try
+            {
+                var closed = MuMuControl.CloseApps(instance);
+                Log.Write($"Closed apps on '{title}': {(closed.Count == 0 ? "none running" : string.Join(", ", closed))}");
+                message = closed.Count switch
+                {
+                    0 => "No apps were running.",
+                    1 => $"Closed {closed[0]}.",
+                    var n => $"Closed {n} apps.",
+                };
+            }
+            catch (Exception ex)
+            {
+                Log.Write($"Close apps on '{title}' failed: {ex}");
+                (message, ok) = ($"Could not close apps: {ex.Message}", false);
+            }
+            Post(() => Notify($"{title}: {message}", warning: !ok));
+        });
+    }
+
     public void Notify(string text, bool warning = false) =>
         _tray.ShowBalloonTip(6000, "MuMu Device Frames", text, warning ? ToolTipIcon.Warning : ToolTipIcon.Info);
 
     /// <summary>Category ▸ Model ▸ Variant, with a fit hint per model when the emulator picture size is known.</summary>
     private void AddFrameTree(ToolStripItemCollection items, string? selectedKey, Size? renderSize, Action<FrameInfo> choose)
     {
+        if (Library.Frames.Count == 0) items.Add(new MenuItem("No frames installed") { Enabled = false });
         foreach (var category in Library.Frames.GroupBy(f => f.Category))
         {
-            var categoryItem = new ToolStripMenuItem(category.Key);
+            var categoryItem = new MenuItem(category.Key);
             foreach (var model in category.GroupBy(f => f.Model))
             {
-                string hint = "";
+                string? hint = null;
+                var tone = HintTone.Secondary;
                 if (renderSize is { Width: > 0 } size)
                 {
                     double mismatch = model.First().Mismatch(size.Width, size.Height);
-                    hint = mismatch < 0.002 ? "   ● exact fit" : mismatch <= FrameLibrary.StretchTolerance ? "   ○ near fit" : "";
+                    if (mismatch < 0.002) (hint, tone) = ("Exact fit", HintTone.Good);
+                    else if (mismatch <= FrameLibrary.StretchTolerance) hint = "Near fit";
                 }
-                var modelItem = new ToolStripMenuItem(model.Key + hint);
+                var modelItem = new MenuItem(model.Key) { Hint = hint, HintTone = tone };
                 foreach (var frame in model)
                 {
                     bool selected = string.Equals(frame.Key, selectedKey, StringComparison.OrdinalIgnoreCase);
@@ -360,8 +480,8 @@ internal sealed class TrayApp : ApplicationContext
         }
     }
 
-    private static ToolStripMenuItem Check(string text, bool isChecked, Action onClick) =>
-        new(text, null, (_, _) => onClick()) { Checked = isChecked };
+    private static MenuItem Check(string text, bool isChecked, Action onClick, string? hint = null) =>
+        new(text, null, onClick) { Checked = isChecked, Hint = hint };
 
     private static string? Describe(FrameInfo? frame) => frame == null ? null : $"{frame.Model} / {frame.Variant}";
 
@@ -387,12 +507,15 @@ internal sealed class TrayApp : ApplicationContext
         Config.Instances = fresh.Instances;
         Config.AndroidSdk = fresh.AndroidSdk; Config.StatusBarPaddingFactor = fresh.StatusBarPaddingFactor;
         Config.StatusBarClock = fresh.StatusBarClock; Config.StatusBarFont = fresh.StatusBarFont; Config.IosStatusBar = fresh.IosStatusBar;
+        Config.LastActiveEmulator = fresh.LastActiveEmulator;
         bool interactiveChanged = Config.BezelInteractive != fresh.BezelInteractive;
         Config.BezelInteractive = fresh.BezelInteractive;
-        if (Config.Hotkey != fresh.Hotkey)
+        if (Config.Hotkey != fresh.Hotkey || Config.ExpoReloadHotkey != fresh.ExpoReloadHotkey || Config.ExpoGearHotkey != fresh.ExpoGearHotkey)
         {
             Config.Hotkey = fresh.Hotkey;
-            RegisterHotkey();
+            Config.ExpoReloadHotkey = fresh.ExpoReloadHotkey;
+            Config.ExpoGearHotkey = fresh.ExpoGearHotkey;
+            RegisterHotkeys();
         }
 
         Library = FrameLibrary.Load(Config.FramesRoot);
@@ -408,14 +531,113 @@ internal sealed class TrayApp : ApplicationContext
 
     // ---- hotkey / icon / shutdown -------------------------------------------------------------------------------
 
-    private void RegisterHotkey()
+    private void OnHotkey(int id)
     {
-        UnregisterHotKey(_window.Handle, HotkeyId);
-        if (string.IsNullOrWhiteSpace(Config.Hotkey)) return;
+        switch (id)
+        {
+            case FramesHotkeyId: ToggleAll(); break;
+            case ExpoReloadHotkeyId: RunExpoAction(ExpoAction.Reload); break;
+            case ExpoGearHotkeyId: RunExpoAction(ExpoAction.ToggleGear); break;
+        }
+    }
+
+    private bool RunExpoAction(ExpoAction action) => RunExpoAction(action, null);
+
+    private bool RunExpoAction(ExpoAction action, EmulatorSession? target)
+    {
+        string selection = target == null ? "active" : "menu";
+        if (target == null)
+        {
+            target = SessionForWindow(GetForegroundWindow());
+            if (target == null && _sessions.TryGetValue(_lastActiveEmulator, out var last))
+            {
+                target = last;
+                selection = "last used";
+            }
+            if (target == null && Config.LastActiveEmulator is { } saved)
+            {
+                target = _sessions.Values.FirstOrDefault(session => string.Equals(session.Title, saved, StringComparison.OrdinalIgnoreCase));
+                if (target != null) selection = "remembered";
+            }
+            if (target == null && _sessions.Count == 1)
+            {
+                target = _sessions.Values.First();
+                selection = "only running";
+            }
+        }
+        if (target == null)
+        {
+            Log.Write($"Expo {action}: no emulator selected");
+            Notify("Select a MuMu emulator before using an Expo command.", warning: true);
+            return false;
+        }
+        if (!_expoBusy.Add(target.Pid)) return false;
+
+        RememberEmulator(target);
+        uint pid = target.Pid;
+        string title = target.Title;
+        var knownInstance = target.Instance;
+        Log.Write($"Expo {action} selected '{title}' ({selection})");
+        Task.Run(() =>
+        {
+            ExpoResult result;
+            try
+            {
+                var instance = knownInstance ?? MuMuControl.Locate(pid);
+                result = instance == null
+                    ? new(false, "Could not connect to this emulator's Android guest.")
+                    : ExpoControl.Run(instance, action);
+            }
+            catch (Exception ex)
+            {
+                Log.Write($"Expo action on '{title}' failed: {ex}");
+                result = new(false, $"Expo command failed: {ex.Message}");
+            }
+            Log.Write($"Expo {action} on '{title}': {result.Message}");
+            Post(() =>
+            {
+                _expoBusy.Remove(pid);
+                Notify($"{title}: {result.Message}", warning: !result.Success);
+            });
+        });
+        return true;
+    }
+
+    private EmulatorSession? SessionForWindow(IntPtr hwnd)
+    {
+        if (_sessions.TryGetValue(hwnd, out var session)) return session;
+        // The frame is an owned popup; Android's render surface is a child window.
+        return _sessions.TryGetValue(GetAncestor(hwnd, 3), out session) ? session : null; // GA_ROOTOWNER
+    }
+
+    private void TrackActiveEmulator(IntPtr hwnd)
+    {
+        if (SessionForWindow(hwnd) is { } session) RememberEmulator(session);
+    }
+
+    private void RememberEmulator(EmulatorSession session)
+    {
+        _lastActiveEmulator = session.Main;
+        if (Config.LastActiveEmulator == session.Title) return;
+        Config.LastActiveEmulator = session.Title;
+        Config.Save();
+    }
+
+    private void RegisterHotkeys()
+    {
+        foreach (int id in new[] { FramesHotkeyId, ExpoReloadHotkeyId, ExpoGearHotkeyId }) UnregisterHotKey(_window.Handle, id);
+        RegisterHotkey(FramesHotkeyId, Config.Hotkey);
+        RegisterHotkey(ExpoReloadHotkeyId, Config.ExpoReloadHotkey);
+        RegisterHotkey(ExpoGearHotkeyId, Config.ExpoGearHotkey);
+    }
+
+    private void RegisterHotkey(int id, string binding)
+    {
+        if (string.IsNullOrWhiteSpace(binding)) return;
 
         uint mods = MOD_NOREPEAT;
         Keys key = Keys.None;
-        foreach (var part in Config.Hotkey.Split('+', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries))
+        foreach (var part in binding.Split('+', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries))
         {
             switch (part.ToLowerInvariant())
             {
@@ -426,8 +648,8 @@ internal sealed class TrayApp : ApplicationContext
                 default: Enum.TryParse(part, ignoreCase: true, out key); break;
             }
         }
-        if (key == Keys.None || !RegisterHotKey(_window.Handle, HotkeyId, mods, (uint)key))
-            Log.Write($"Could not register hotkey '{Config.Hotkey}'");
+        if (key == Keys.None || !RegisterHotKey(_window.Handle, id, mods, (uint)key))
+            Log.Write($"Could not register hotkey '{binding}'");
     }
 
     /// <summary>The executable's own icon, so tray and taskbar match; falls back to a drawn one.</summary>
@@ -477,6 +699,7 @@ internal sealed class TrayApp : ApplicationContext
     public void Shutdown()
     {
         _scanTimer.Stop();
+        if (_foregroundHook != IntPtr.Zero) UnhookWinEvent(_foregroundHook);
         foreach (var session in _sessions.Values) session.Dispose();
         _sessions.Clear();
     }
@@ -484,7 +707,7 @@ internal sealed class TrayApp : ApplicationContext
     protected override void ExitThreadCore()
     {
         Shutdown();
-        UnregisterHotKey(_window.Handle, HotkeyId);
+        foreach (int id in new[] { FramesHotkeyId, ExpoReloadHotkeyId, ExpoGearHotkeyId }) UnregisterHotKey(_window.Handle, id);
         _tray.Visible = false;
         _tray.Dispose();
         _icon?.Dispose();
@@ -500,25 +723,41 @@ internal sealed class TrayApp : ApplicationContext
         return hwnd != IntPtr.Zero && PostMessageW(hwnd, HiddenWindow.WM_EXIT_REQUEST, IntPtr.Zero, IntPtr.Zero);
     }
 
+    /// <summary>Posts an Expo action to the tray instance for command-line hotkey tools.</summary>
+    public static bool RequestExpoActionOfRunningInstance(ExpoAction action)
+    {
+        IntPtr hwnd = FindWindowW(null, HiddenWindow.WindowCaption);
+        int message = action == ExpoAction.Reload ? HiddenWindow.WM_EXPO_RELOAD : HiddenWindow.WM_EXPO_GEAR;
+        return hwnd != IntPtr.Zero &&
+            SendMessageTimeoutW(hwnd, message, IntPtr.Zero, IntPtr.Zero, SMTO_ABORTIFHUNG, 5000, out var result) != IntPtr.Zero &&
+            result != IntPtr.Zero;
+    }
+
     /// <summary>Receives the hotkey and lends foreground status to the bezel context menu.</summary>
     private sealed class HiddenWindow : NativeWindow
     {
         public const string WindowCaption = "MuMuDeviceFramesHost";
         public const int WM_EXIT_REQUEST = 0x8000 + 1; // WM_APP + 1, posted by "MuMuDeviceFrames.exe --exit"
+        public const int WM_EXPO_RELOAD = 0x8000 + 2, WM_EXPO_GEAR = 0x8000 + 3;
 
-        private readonly Action _onHotkey, _onExit;
+        private readonly Action<int> _onHotkey;
+        private readonly Func<ExpoAction, bool> _onExpoAction;
+        private readonly Action _onExit;
 
-        public HiddenWindow(Action onHotkey, Action onExit)
+        public HiddenWindow(Action<int> onHotkey, Func<ExpoAction, bool> onExpoAction, Action onExit)
         {
             _onHotkey = onHotkey;
+            _onExpoAction = onExpoAction;
             _onExit = onExit;
             CreateHandle(new CreateParams { Caption = WindowCaption, Style = unchecked((int)WS_POPUP), ExStyle = (int)WS_EX_TOOLWINDOW });
         }
 
         protected override void WndProc(ref Message m)
         {
-            if (m.Msg == WM_HOTKEY) _onHotkey();
-            else if (m.Msg == WM_EXIT_REQUEST) _onExit();
+            if (m.Msg == WM_HOTKEY) { _onHotkey(m.WParam.ToInt32()); return; }
+            if (m.Msg == WM_EXIT_REQUEST) { _onExit(); return; }
+            if (m.Msg == WM_EXPO_RELOAD) { m.Result = _onExpoAction(ExpoAction.Reload) ? (IntPtr)1 : IntPtr.Zero; return; }
+            if (m.Msg == WM_EXPO_GEAR) { m.Result = _onExpoAction(ExpoAction.ToggleGear) ? (IntPtr)1 : IntPtr.Zero; return; }
             base.WndProc(ref m);
         }
     }

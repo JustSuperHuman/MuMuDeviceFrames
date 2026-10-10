@@ -193,6 +193,27 @@ internal static class MuMuControl
             "-k", "resolution_dpi.custom", "-val", dpi.ToString(),
         ]).Output.Trim();
 
+    // Goes home, then force-stops each running user-installed app except the launcher and the keyboard.
+    private const string CloseAppsScript =
+        "input keyevent 3; " +
+        "home=$(cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.HOME | tail -n 1 | cut -d/ -f1); " +
+        "ime=$(settings get secure default_input_method | cut -d/ -f1); " +
+        "for p in $(pm list packages -3 | cut -d: -f2); do " +
+        "[ \"$p\" = \"$home\" ] || [ \"$p\" = \"$ime\" ] && continue; " +
+        "pidof $p >/dev/null && am force-stop $p && echo \"closed $p\"; " +
+        "done; exit 0";
+
+    /// <summary>Closes the apps running in the emulator, as "clear all" in Recents would. Returns the packages it stopped.</summary>
+    public static List<string> CloseApps(MuMuInstance instance)
+    {
+        var result = instance.Shell(CloseAppsScript);
+        if (result.ExitCode != 0) throw new InvalidOperationException(result.Output.Trim());
+        return result.Output.Split('\n', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+            .Where(line => line.StartsWith("closed ", StringComparison.Ordinal))
+            .Select(line => line["closed ".Length..])
+            .ToList();
+    }
+
     public static string Restart(MuMuInstance instance) =>
         ProcessRunner.Run(instance.ManagerPath, ["control", "-v", instance.Index, "restart"], 180_000).Output.Trim();
 }

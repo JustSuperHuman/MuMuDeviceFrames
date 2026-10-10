@@ -214,6 +214,13 @@ internal static class Diagnostics
 
     internal static void SavePremultiplied(byte[] canvas, int width, int height, string outPath)
     {
+        using var output = ToBitmap(canvas, width, height);
+        output.Save(outPath, ImageFormat.Png);
+    }
+
+    /// <summary>A straight-alpha bitmap of a premultiplied BGRA canvas (which is un-premultiplied in place).</summary>
+    internal static Bitmap ToBitmap(byte[] canvas, int width, int height)
+    {
         // PNG wants straight alpha.
         for (int i = 0; i < width * height; i++)
         {
@@ -221,10 +228,10 @@ internal static class Diagnostics
             if (a is 0 or 255) continue;
             for (int c = 0; c < 3; c++) canvas[i * 4 + c] = (byte)Math.Min(255, canvas[i * 4 + c] * 255 / a);
         }
-        using var output = new Bitmap(width, height, PixelFormat.Format32bppArgb);
+        var output = new Bitmap(width, height, PixelFormat.Format32bppArgb);
         var outData = output.LockBits(new Rectangle(0, 0, width, height), ImageLockMode.WriteOnly, PixelFormat.Format32bppArgb);
         for (int y = 0; y < height; y++) Marshal.Copy(canvas, y * width * 4, outData.Scan0 + y * outData.Stride, width * 4);
         output.UnlockBits(outData);
-        output.Save(outPath, ImageFormat.Png);
+        return output;
     }
 }
