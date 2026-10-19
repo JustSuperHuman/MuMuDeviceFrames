@@ -37,11 +37,34 @@ was nothing like it.
 
 ## Install
 
-1. Download `MuMuDeviceFrames-win-x64.zip` from [Releases](https://github.com/JustSuperHuman/MuMuDeviceFrames/releases),
-   unzip anywhere, run `MuMuDeviceFrames.exe`. It lives in the tray. (Self-contained; nothing else to install.)
-2. Say yes to the frame download (~35 MB, once).
-3. Start a MuMu emulator. It gets the frame that best fits its picture — with MuMu's default phone resolution that is
-   an iPhone 16 Pro / 17 Pro.
+In PowerShell (no admin rights needed):
+
+```powershell
+irm https://raw.githubusercontent.com/JustSuperHuman/MuMuDeviceFrames/main/install.ps1 | iex
+```
+
+That installs the latest release to `%LOCALAPPDATA%\Programs\MuMuDeviceFrames`, downloads the frame set (~35 MB, once),
+adds a Start menu shortcut, turns on **Start with Windows** and starts the tray app. Run it again to update.
+Then start a MuMu emulator. It gets the frame that best fits its picture — with MuMu's default phone resolution that is
+an iPhone 16 Pro / 17 Pro.
+
+Options (pass them through a script block):
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/JustSuperHuman/MuMuDeviceFrames/main/install.ps1))) -NoStartup
+```
+
+| Option | |
+| --- | --- |
+| `-NoStartup` | Don't start with Windows (the tray menu can turn it on later) |
+| `-Version v1.1.0` | Install a specific release instead of the latest |
+| `-Zip <path>` | Install a local build (zip or `publish` folder), e.g. `.\install.ps1 -Zip publish` from a clone |
+| `-NoLaunch` | Install without starting the app |
+| `-Uninstall` | Quit the app, restore the emulator windows, remove the startup entry, shortcut and program folder (keeps `%APPDATA%\MuMuDeviceFrames`) |
+
+Manual install: download `MuMuDeviceFrames-win-x64.zip` from
+[Releases](https://github.com/JustSuperHuman/MuMuDeviceFrames/releases), unzip anywhere and run `MuMuDeviceFrames.exe`
+(self-contained; nothing else to install). Say yes to the frame download.
 
 For the Android matching (status bar/cutout) the tool needs the Android SDK build tools and a Java runtime; see below.
 
