@@ -60,6 +60,7 @@ Options (pass them through a script block):
 | `-Version v1.1.0` | Install a specific release instead of the latest |
 | `-Zip <path>` | Install a local build (zip or `publish` folder), e.g. `.\install.ps1 -Zip publish` from a clone |
 | `-NoLaunch` | Install without starting the app |
+| `-InstallAndroidTools` | Run interactive WinGet setup for the optional Android safe-area and iOS status-bar tools |
 | `-Uninstall` | Quit the app, restore the emulator windows, remove the startup entry, shortcut and program folder (keeps `%APPDATA%\MuMuDeviceFrames`) |
 
 Manual install: download `MuMuDeviceFrames-win-x64.zip` from
@@ -128,9 +129,27 @@ lets an overlay signed like its target override any of the target's resources. T
 resource-overlay APKs (`com.justsuperhuman.deviceframes.cutout` → `android`, `….systemui` → `com.android.systemui`),
 signs them with that key ([`tools/aosp-platform-key`](tools/aosp-platform-key/README.md)) and enables them over adb.
 
-Requirements: Android SDK build-tools (`aapt2`, `zipalign`, `apksigner`) and a platform `android.jar`, found through
-`ANDROID_HOME` or the `AndroidSdk` config entry, plus Java for `apksigner`. Android Studio's SDK Manager installs all of
-it. To remove by hand: `adb uninstall com.justsuperhuman.deviceframes.systemui` and `…deviceframes.cutout`.
+When cutout matching or the iOS-style status bar needs missing tools, the app offers to install them. The prompt appears
+once per app session, shared across emulators. Choose **No** to defer, then use **Install / repair Android display tools**
+in the tray menu whenever you are ready. The iOS bar waits until Android's matching safe-area overlay is installed.
+
+Setup reuses existing tools. When needed, it uses WinGet's exact `EclipseAdoptium.Temurin.21.JDK` and `Google.AndroidCLI`
+packages, then Google's Android CLI installs only SDK build-tools 35.0.0 and platform 35. Android Studio and emulator
+images are not required. A console shows progress and package/license prompts; Java's installer may request administrator
+approval. Close the setup window to cancel. Failed or partial installations can be retried from the tray menu.
+The setup log is `%APPDATA%\MuMuDeviceFrames\android-tools-install.log`.
+
+After successful verification, the app saves the SDK path and retries failed overlays automatically, without a restart.
+It detects newly installed Java through user/machine settings and standard install locations, even when the running
+app has an older environment. It does not replace your global SDK environment settings.
+
+For setup from PowerShell, run `tools/install-android-tools.ps1` (optionally `-SdkRoot 'D:\Android SDK'`), or pass
+`-InstallAndroidTools` to `install.ps1`. If WinGet is missing, install or update
+[App Installer](https://aka.ms/getwinget), then retry. You can also install dependencies manually: SDK build-tools
+(`aapt2`, `zipalign`, `apksigner` including its JAR), a platform `android.jar`, and Java 17 or newer. The SDK is found
+through `AndroidSdk` in config, `ANDROID_HOME`, `ANDROID_SDK_ROOT`, or `%LOCALAPPDATA%\Android\Sdk`.
+Android Studio's SDK Manager can install the SDK components. To remove overlays by hand:
+`adb uninstall com.justsuperhuman.deviceframes.systemui` and `…deviceframes.cutout`.
 
 ## Configuration
 
@@ -203,6 +222,13 @@ dotnet publish -c Release -r win-x64 --self-contained -p:PublishSingleFile=true 
 
 .NET 10 SDK. Source is in `src/`; `tools/make-icon.ps1` regenerates the icon. Releases are built by
 [GitHub Actions](.github/workflows/build.yml) on `v*` tags.
+
+Dependency checks and installer regression checks (no package installation or emulator required):
+
+```powershell
+dotnet run --project tests/AndroidTools.Tests.csproj -c Release
+./tests/install-android-tools.tests.ps1
+```
 
 ## Credits
 

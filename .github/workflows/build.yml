@@ -23,6 +23,13 @@ jobs:
       - name: Build
         run: dotnet build -c Release --nologo
 
+      - name: Verify Android tools detection and setup
+        shell: powershell
+        run: |
+          dotnet run --project tests/AndroidTools.Tests.csproj -c Release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./tests/install-android-tools.tests.ps1
+
       - name: Publish (self-contained, single file, win-x64)
         run: dotnet publish -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:DebugType=none -o publish --nologo
 

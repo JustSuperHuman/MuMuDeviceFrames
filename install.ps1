@@ -23,6 +23,7 @@ param(
     [string]$InstallDir = (Join-Path $env:LOCALAPPDATA 'Programs\MuMuDeviceFrames'),
     [switch]$NoStartup,
     [switch]$NoLaunch,
+    [switch]$InstallAndroidTools,  # optional interactive WinGet setup for safe areas / iOS status bar
     [switch]$Uninstall
 )
 
@@ -108,6 +109,22 @@ if ($NoStartup) {
 } else {
     Step 'Turning on Start with Windows'
     Set-ItemProperty -Path $RunKey -Name $RunValue -Value "`"$Exe`""
+}
+
+if ($InstallAndroidTools) {
+    Step 'Setting up optional Android display tools (package and license prompts may appear)'
+    $setup = Join-Path $InstallDir 'tools\install-android-tools.ps1'
+    if (-not (Test-Path -LiteralPath $setup -PathType Leaf)) { throw "Android tools setup script is missing from this release: $setup" }
+    $setupArguments = @{}
+    $configPath = Join-Path $env:APPDATA 'MuMuDeviceFrames\config.json'
+    if (Test-Path -LiteralPath $configPath) {
+        try {
+            $savedConfig = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
+            if ($savedConfig.AndroidSdk) { $setupArguments.SdkRoot = [string]$savedConfig.AndroidSdk }
+        } catch { Write-Warning 'Could not read the saved SDK path. Android tools setup will use the default location.' }
+    }
+    & $setup @setupArguments
+    if ($LASTEXITCODE -ne 0) { Write-Warning 'Android display tools setup did not finish. Retry from the tray menu.' }
 }
 
 if (-not $NoLaunch) {

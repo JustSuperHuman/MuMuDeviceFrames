@@ -136,9 +136,12 @@ internal sealed class EmulatorSession : IDisposable
     private void EnsureStatusBar(Point picture)
     {
         bool wanted = _app.Config.IosStatusBarFor(Title) && Instance != null && Display != null && Frame != null;
+        // Drawing the bar alone does not reserve space in apps. Wait for Android's matching insets before covering it.
+        wanted = wanted && _app.Config.Instance(Title).InstalledCutout ==
+            AndroidCutout.Signature(Frame!, Display!, _app.Config.StatusBarPaddingFactor, hideNotificationIcons: true);
         if (!wanted)
         {
-            if (_barApplied)
+            if (_barApplied && !_androidBusy)
             {
                 _barApplied = false;
                 var instance = Instance!;
@@ -163,10 +166,10 @@ internal sealed class EmulatorSession : IDisposable
 
         if (_barLayout == null || _barLayoutFrame != Frame!.Key)
         {
-            var spec = AndroidCutout.Measure(Frame, Display!, _app.Config.StatusBarPaddingFactor);
+            var spec = AndroidCutout.Measure(Frame!, Display!, _app.Config.StatusBarPaddingFactor);
             if (spec == null) return;
             _barLayout = StatusBarLayout.From(spec, Display!);
-            _barLayoutFrame = Frame.Key;
+            _barLayoutFrame = Frame!.Key;
             _barShown = null;
         }
 
@@ -277,6 +280,14 @@ internal sealed class EmulatorSession : IDisposable
         var (frame, display2, instance2, factor, sdk) = (Frame, Display, Instance, _app.Config.StatusBarPaddingFactor, _app.Config.AndroidSdk);
         RunAndroidTask(() =>
         {
+            var missing = AndroidTools.Missing(sdk);
+            if (missing.Count > 0)
+                return () =>
+                {
+                    _failedCutout = signature;
+                    Log.Write($"'{Title}': missing Android display tools: {string.Join(", ", missing)}");
+                    _app.OfferAndroidTools();
+                };
             var spec = AndroidCutout.Measure(frame, display2, factor);
             string? error = spec == null ? "frame and display orientation differ" : AndroidCutout.Apply(instance2, spec, sdk, iosBar);
             return () =>
@@ -299,6 +310,13 @@ internal sealed class EmulatorSession : IDisposable
     }
 
     /// <summary>Retry after a failure, or rebuild on request.</summary>
+    public void RetryCutout()
+    {
+        _failedCutout = null;
+        Sync();
+    }
+
+    /// <summary>Rebuild even when the stored frame signature has not changed.</summary>
     public void ForceCutout()
     {
         _failedCutout = null;

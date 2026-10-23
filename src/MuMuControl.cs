@@ -21,6 +21,7 @@ internal static class ProcessRunner
         var line = new StringBuilder($"\"{batchFile}\"");
         foreach (var argument in arguments) line.Append(" \"").Append(argument).Append('"');
         var info = new ProcessStartInfo("cmd.exe", $"/s /c \"{line}\"") { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
+        if (AndroidTools.JavaHome() is { } javaHome) info.Environment["JAVA_HOME"] = javaHome;
         return Run(info, timeoutMs);
     }
 
@@ -221,9 +222,23 @@ internal static class MuMuControl
 internal static class AndroidSdk
 {
     public static string? Root(string? configured = null) =>
-        new[] { configured, Environment.GetEnvironmentVariable("ANDROID_HOME"), Environment.GetEnvironmentVariable("ANDROID_SDK_ROOT"),
-                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Android", "Sdk") }
-            .FirstOrDefault(p => !string.IsNullOrWhiteSpace(p) && Directory.Exists(p));
+        !string.IsNullOrWhiteSpace(configured) ? Path.GetFullPath(configured) :
+        Roots().FirstOrDefault(HasBuildTools) ?? Roots().FirstOrDefault(Directory.Exists);
+
+    public static string DefaultRoot => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Android", "Sdk");
+
+    private static IEnumerable<string> Roots() => new[]
+        {
+            Environment.GetEnvironmentVariable("ANDROID_HOME"), Environment.GetEnvironmentVariable("ANDROID_SDK_ROOT"),
+            Environment.GetEnvironmentVariable("ANDROID_HOME", EnvironmentVariableTarget.User),
+            Environment.GetEnvironmentVariable("ANDROID_SDK_ROOT", EnvironmentVariableTarget.User), DefaultRoot,
+        }.Where(p => !string.IsNullOrWhiteSpace(p)).Select(p => p!).Distinct(StringComparer.OrdinalIgnoreCase);
+
+    private static bool HasBuildTools(string root) => Directory.Exists(Path.Combine(root, "build-tools")) &&
+        Directory.GetDirectories(Path.Combine(root, "build-tools")).Any(d =>
+            new[] { "aapt2.exe", "zipalign.exe", "apksigner.bat", "lib/apksigner.jar" }.All(f => File.Exists(Path.Combine(d, f)))) &&
+        Directory.Exists(Path.Combine(root, "platforms")) &&
+        Directory.GetDirectories(Path.Combine(root, "platforms")).Any(d => File.Exists(Path.Combine(d, "android.jar")));
 
     public static string? Find(string folder, string file, string? configured = null)
     {

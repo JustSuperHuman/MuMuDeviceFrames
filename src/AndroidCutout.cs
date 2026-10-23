@@ -121,6 +121,8 @@ internal static class AndroidCutout
     /// <param name="hideNotificationIcons">For the iOS-style bar: no notification icons next to where its time is drawn.</param>
     public static string? Apply(MuMuInstance instance, Spec spec, string? sdkRoot, bool hideNotificationIcons = false)
     {
+        var missing = AndroidTools.Missing(sdkRoot);
+        if (missing.Count > 0) return $"Missing Android display tools: {string.Join(", ", missing)}. Use Install / repair Android display tools in the tray menu.";
         string? aapt2 = AndroidSdk.Newest("build-tools", "aapt2.exe", sdkRoot), zipalign = AndroidSdk.Newest("build-tools", "zipalign.exe", sdkRoot),
                 apksigner = AndroidSdk.Newest("build-tools", "apksigner.bat", sdkRoot), androidJar = AndroidSdk.Newest("platforms", "android.jar", sdkRoot);
         if (aapt2 == null || zipalign == null || apksigner == null || androidJar == null)

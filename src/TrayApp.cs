@@ -111,6 +111,65 @@ internal sealed class TrayApp : ApplicationContext
         catch (Exception ex) { Log.Write($"UI callback failed: {ex}"); }
     }, null);
 
+    private bool _toolsPrompted, _toolsBusy;
+
+    public void OfferAndroidTools()
+    {
+        if (_toolsPrompted || _toolsBusy) return;
+        _toolsPrompted = true;
+        Post(() => SetupAndroidTools(automatic: true));
+    }
+
+    private async void SetupAndroidTools(bool automatic = false)
+    {
+        if (_toolsBusy) return;
+        _toolsBusy = true;
+        try
+        {
+            AndroidTools.Refresh();
+            var missing = await Task.Run(() => AndroidTools.Missing(Config.AndroidSdk));
+            if (missing.Count == 0)
+            {
+                foreach (var session in _sessions.Values.ToArray()) session.RetryCutout();
+                if (!automatic) Notify("Android display tools are ready. Retrying any failed display overlays.");
+                return;
+            }
+            _toolsPrompted = true;
+            var answer = MessageBox.Show(
+                "Safe areas and the iOS-style status bar need additional Android tools.\n\n" +
+                $"Missing: {string.Join(", ", missing)}.\n\n" +
+                "Install the missing tools using WinGet? Setup reuses existing tools and downloads Java and Google's Android CLI/SDK as needed. " +
+                "A setup window will show progress and package/license prompts. Java may request administrator approval.\n\n" +
+                "Choose No to skip for this session. You can retry from Install / repair Android display tools in the tray menu.",
+                "Set up Android display tools", MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2);
+            if (answer != DialogResult.Yes) return;
+
+            string root = AndroidSdk.Root(Config.AndroidSdk) ?? AndroidSdk.DefaultRoot;
+            int exit = await AndroidTools.InstallAsync(root);
+            var remaining = await Task.Run(() => AndroidTools.Missing(root));
+            if (exit != 0 || remaining.Count > 0)
+            {
+                Log.Write($"Android tools setup exited with {exit}; missing: {string.Join(", ", remaining)}");
+                MessageBox.Show("Android tools setup did not complete. You can retry from the tray menu.\n\n" +
+                    (remaining.Count > 0 ? $"Still missing: {string.Join(", ", remaining)}.\n\n" : "") +
+                    $"Details: {Path.Combine(AppConfig.Dir, "android-tools-install.log")}\n\n" +
+                    "If WinGet is unavailable, install or update App Installer at https://aka.ms/getwinget, or install the SDK build-tools/platform and Java 17+ manually.",
+                    "Android tools setup", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+            Config.AndroidSdk = root;
+            Config.Save();
+            foreach (var session in _sessions.Values.ToArray()) session.RetryCutout();
+            Notify("Android display tools installed. Applying safe areas to your emulators.");
+        }
+        catch (Exception ex)
+        {
+            Log.Write($"Android tools setup failed: {ex}");
+            Notify($"Android tools setup failed: {ex.Message}. Retry from the tray menu.", warning: true);
+        }
+        finally { _toolsBusy = false; }
+    }
+
     // ---- emulator discovery -------------------------------------------------------------------------------------
 
     private void Scan()
@@ -282,6 +341,8 @@ internal sealed class TrayApp : ApplicationContext
             ? new MenuItem("Download device frames…", DownloadGlyph, DownloadFrames) { Hint = "~35 MB", Enabled = !_downloading }
             : new MenuItem("Update device frames", DownloadGlyph, DownloadFrames) { Hint = $"{Library.Frames.Count} installed", Enabled = !_downloading });
         items.Add(new MenuItem("Reload frames and config", RefreshGlyph, Reload));
+        items.Add(new MenuItem(_toolsBusy ? "Android display tools setup in progress…" : "Install / repair Android display tools…",
+            DownloadGlyph, () => SetupAndroidTools()) { Enabled = !_toolsBusy });
         items.Add(new MenuItem("Open config folder", FolderGlyph, () =>
         {
             Config.Save();
@@ -643,6 +704,8 @@ internal sealed class TrayApp : ApplicationContext
             if (interactiveChanged) session.RecreateOverlay();
         }
         SyncAll(invalidate: true);
+        AndroidTools.Refresh();
+        foreach (var session in _sessions.Values.ToArray()) session.RetryCutout();
     }
 
     // ---- hotkey / icon / shutdown -------------------------------------------------------------------------------
