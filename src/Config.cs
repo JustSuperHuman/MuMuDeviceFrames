@@ -15,6 +15,16 @@ internal sealed class InstanceConfig
     /// <summary>What the installed overlays were built for; they are rebuilt when frame or display change.</summary>
     public string? InstalledCutout { get; set; }
 
+    /// <summary>
+    /// An iOS safe-area overlay waiting for this emulator's next start: changing the overlay of an emulator that is
+    /// running relaunches its apps, so it goes in when Android starts (or at "Restart to finish iOS setup").
+    /// </summary>
+    public string? PendingIosSetup { get; set; }
+
+    /// <summary>iOS's home indicator and its 34 pt safe area on a Face ID iPhone frame; false keeps Android's bottom
+    /// as it is (the opt-out). Null follows the default, on.</summary>
+    public bool? IosHomeIndicator { get; set; }
+
     /// <summary>The iPhone Duo's overlays installed on this emulator (<see cref="AndroidCutout.DuoSignature"/>).</summary>
     public string? DuoOverlay { get; set; }
 

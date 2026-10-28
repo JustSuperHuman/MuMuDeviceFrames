@@ -94,13 +94,20 @@ Check(allFit, "Duo picture fits its frame exactly at every window width from 400
 
 // wm size takes natural-orientation sizes; the rotation lock keeps a portrait-only app from turning MuMu's window round.
 var turned = (string[])Call("IPhoneDuo", "Commands", Folded, new System.Drawing.Size(2034, 2670), false)!;
-Check(turned.Contains("wm size 2034x1398") && turned.Contains("wm user-rotation lock 3") && turned.Contains("wm fixed-to-user-rotation enabled") && turned.Contains("wm density 480"),
-    "Fold on MuMu's turned panel swaps the size and pins rotation 270 (the rail edge on the right)");
-// The rail is one display-cutout edge of the panel: on MuMu's turned panel the top edge, which rotation 270 shows on the
-// right (rail poses) and rotation 0 at the top (upright poses), as measured with the probe: at 90 it came out on the left.
-Check((string)Call("IPhoneDuo", "RailEdge", new System.Drawing.Size(2034, 2670))! == "top"
-      && ((string[])Call("IPhoneDuo", "Commands", OpenPortrait, new System.Drawing.Size(2034, 2670), false)!).Contains("wm user-rotation lock 0"),
-    "Rail edge on the turned panel's top: 270 in the rail poses, 0 upright");
+Check(turned.Contains("wm size 2034x1398") && turned.Contains("wm user-rotation lock 1") && turned.Contains("wm fixed-to-user-rotation enabled") && turned.Contains("wm density 480"),
+    "Fold on MuMu's turned panel swaps the size and pins rotation 90");
+// The safe areas are waterfalls on the panel's own edges, turned by each pose group's rotation. Measured with the probe
+// on MuMu's turned panel: at 90 the panel's top showed on the left (so its bottom on the right), at 270 on the right.
+// Neither rail edge may be the panel's top: upright (rotation 0) a stale rail set would size the status bar.
+var areas = Activator.CreateInstance(assembly.GetType("MuMuDeviceFrames.DuoSafeAreas")!, 252, 204, 102, true)!;
+var railNatural = (System.Runtime.CompilerServices.ITuple)areas.GetType().GetProperty("RailNatural")!.GetValue(areas)!;
+var uprightNatural = (System.Runtime.CompilerServices.ITuple)areas.GetType().GetProperty("UprightNatural")!.GetValue(areas)!;
+Check((int)railNatural[3]! == 252 && (int)railNatural[0]! == 102 && (int)railNatural[1]! == 0 && (int)railNatural[2]! == 0,
+    "Rail poses (rotation 90): right 84 pt from the panel's bottom edge, bottom 34 pt from its left edge, nothing on its top");
+Check((int)uprightNatural[3]! == 102 && (int)uprightNatural[0]! == 0 && (int)uprightNatural[1]! == 0 && (int)uprightNatural[2]! == 0,
+    "Upright poses (rotation 0): the home indicator on the panel's bottom edge; their top comes from the status bar");
+Check(((string[])Call("IPhoneDuo", "Commands", OpenPortrait, new System.Drawing.Size(2034, 2670), false)!).Contains("wm user-rotation lock 0"),
+    "Upright poses keep rotation 0");
 Check(((string[])Call("IPhoneDuo", "Commands", Open, new System.Drawing.Size(2034, 2670), false)!).Contains("wm size 1878x2670"), "Unfold on MuMu's turned panel swaps the size");
 var natural = (string[])Call("IPhoneDuo", "Commands", Folded, new System.Drawing.Size(2670, 2034), false)!;
 Check(natural.Contains("wm size 1398x2034") && natural.Contains("wm user-rotation lock 0"), "Fold on a landscape-natural panel keeps the size and rotation 0");

@@ -16,7 +16,7 @@ internal sealed class EmulatorSession : IDisposable
     private OverlayWindow? _chrome; // iOS chrome over the picture: home indicator, or the Duo's rail / status bar
     private (ChromeState State, Size Picture)? _chromeShown;
     private System.Windows.Forms.Timer? _chromeTimer;
-    private bool _chromeDark, _chromePolling, _duoBarHidden;
+    private bool _chromeDark, _homeDark, _chromePolling, _duoBarHidden, _gesturesChecked;
     private OverlayWindow? _fade;  // the previous frame, fading out over a pose switch
     private System.Windows.Forms.Timer? _fadeTimer;
     private DateTime _fadeStart;
@@ -263,12 +263,12 @@ internal sealed class EmulatorSession : IDisposable
         if (Frame is not { } frame || Display is not { } display || !_app.Config.IosStatusBarFor(Title, frame)) return null;
         bool duo = IPhoneDuo.IsDuo(frame);
         if (duo && Pose == null) return null;
-        bool home = IosChrome.HomeIndicator(frame);
+        bool home = IosChrome.HomeIndicator(frame, _app.Config.Instance(Title).DuoOverlay, _app.Config.Instance(Title).InstalledCutout);
         var kind = IosChrome.KindFor(frame, Pose);
         if (kind == ChromeKind.None && !home) return null;
         var screen = duo && Pose is { } pose ? IPhoneDuo.ScreenSize(pose) : display.Native;
         return new ChromeState(kind, home, screen, display.DensityOverride ?? display.Density, _barApplied ? _barDark : _chromeDark,
-            IosStatusBar.ClockText(_app.Config.StatusBarClock));
+            IosStatusBar.ClockText(_app.Config.StatusBarClock), _homeDark);
     }
 
     private void EnsureChrome()
@@ -282,9 +282,8 @@ internal sealed class EmulatorSession : IDisposable
             _duoBarHidden = duo;
             var sdk = _app.Config.AndroidSdk;
             var config = _app.Config.Instance(Title);
-            int rail = (int)Math.Round(IosChrome.RailPt * (display.DensityOverride ?? display.Density) / 160.0);
-            string edge = IPhoneDuo.RailEdge(display.Native);
-            string signature = AndroidCutout.DuoSignature(rail, edge);
+            var areas = DuoSafeAreas.For(display.DensityOverride ?? display.Density, display.Native);
+            string signature = AndroidCutout.DuoSignature(areas);
             bool install = duo && config.DuoOverlay != signature, remove = !duo && config.DuoOverlay != null;
             string title = Title, serial = instance.AdbSerial;
             if (install || remove) DuoSetupRunning.Add(serial);
@@ -296,25 +295,24 @@ internal sealed class EmulatorSession : IDisposable
                     if (duo)
                     {
                         AndroidStatusBar.Hide(instance);
-                        if (install) error = AndroidCutout.ApplyDuo(instance, sdk, rail, edge);
+                        if (install) error = AndroidCutout.ApplyDuo(instance, sdk, areas);
                     }
                     else
                     {
                         AndroidStatusBar.Restore(instance);
                         if (remove) AndroidCutout.Remove(instance);
                     }
-                    // Android reads the display cutout (the rail) only when the display starts. Record what is installed
-                    // first: the restart gives MuMu a new window, and the session attached to it must not install again.
+                    // Android takes the new safe areas as the overlay changes (open apps are relaunched once, as for any
+                    // framework overlay); a display off and on gives the pose it is in its own set.
                     if ((install && error == null) || remove)
                     {
+                        instance.Shell(IPhoneDuo.RefreshSafeAreas);
                         _app.Post(() =>
                         {
                             config.DuoOverlay = install ? signature : null;
                             _app.Config.Save();
-                            _app.Notify($"{title}: restarting once to give apps the iPhone Duo's safe areas.");
                         });
-                        Log.Write($"'{title}': restarting once so Android picks up the {(install ? "rail's safe area" : "removed safe area")}");
-                        if (MuMuControl.RestartAndWait(instance, TimeSpan.FromMinutes(3)) is { } restart) error = restart;
+                        Log.Write($"'{title}': iPhone Duo safe areas {(install ? $"installed ({signature})" : "removed")}");
                     }
                 }
                 finally
@@ -327,6 +325,26 @@ internal sealed class EmulatorSession : IDisposable
                     _chromeDark = dark;
                     Log.Write(error == null ? $"'{Title}': Android status bar {(duo ? "emptied for the iPhone Duo's chrome" : "back")}" : $"'{Title}': Duo status bar overlay: {error}");
                     Sync();
+                };
+            });
+        }
+        // iOS's navigation gestures on the Duo: MuMu switches them off at every boot, so look once per attach and turn
+        // them back on (a framework restart, no emulator restart) where MuMu's root permission allows it.
+        if (duo && !_gesturesChecked && !_androidBusy && Instance is { } gestureInstance)
+        {
+            _gesturesChecked = true;
+            string title = Title;
+            RunAndroidTask(() =>
+            {
+                string? error = null;
+                bool rooted = MuMuControl.GetSetting(gestureInstance, "root_permission") == "true";
+                bool off = !DuoSetup.GesturesOn(gestureInstance);
+                if (off && rooted) error = DuoSetup.EnableGestures(gestureInstance);
+                return () =>
+                {
+                    if (off) Log.Write(!rooted ? $"'{title}': navigation gestures off (MuMu root permission is off)"
+                        : error == null ? $"'{title}': navigation gestures back on" : $"'{title}': navigation gestures: {error}");
+                    _nextPosePoll = DateTime.MinValue; // a framework restart drops the device state: put the pose back
                 };
             });
         }
@@ -368,30 +386,35 @@ internal sealed class EmulatorSession : IDisposable
     /// <summary>Light or dark glyphs, as the app in front asks (the iOS bar polls this itself when it runs).</summary>
     private void PollChromeTheme()
     {
-        if (_chromePolling || _barApplied || CurrentChrome() is not { } state || !GetWindowRect(Main, out var wr)) return;
+        if (_chromePolling || CurrentChrome() is not { } state || !GetWindowRect(Main, out var wr)) return;
         // What is behind the time and ring decides, as on iOS: MuMu's own picture there (PrintWindow sees it whatever
         // covers the window), its median brightness.
-        if (IosChrome.GlyphArea(state) is not { } area || _pictureOnScreen.Width <= 0) return;
+        if (_pictureOnScreen.Width <= 0) return;
         float scale = (float)_pictureOnScreen.Width / state.Screen.Width;
-        var sample = new Rectangle(_pictureOnScreen.X - wr.Left + (int)(area.X * scale), _pictureOnScreen.Y - wr.Top + (int)(area.Y * scale),
+        Rectangle InWindow(Rectangle area) => new(_pictureOnScreen.X - wr.Left + (int)(area.X * scale), _pictureOnScreen.Y - wr.Top + (int)(area.Y * scale),
             Math.Max(1, (int)(area.Width * scale)), Math.Max(1, (int)(area.Height * scale)));
+        Rectangle? glyphs = IosChrome.GlyphArea(state) is { } g ? InWindow(g) : null;
+        Rectangle? home = state.Home ? InWindow(IosChrome.HomeArea(state)) : null;
+        if (glyphs == null && home == null) return;
         _chromePolling = true;
         var main = Main;
         Task.Run(() =>
         {
-            bool? dark = null;
+            bool? dark = null, homeDark = null;
             try
             {
                 using var shot = Diagnostics.PrintEmulator(main, wr);
-                dark = IosChrome.IsLight(shot, sample);
+                if (glyphs is { } a) dark = IosChrome.IsLight(shot, a);
+                if (home is { } b) homeDark = IosChrome.IsLight(shot, b);
             }
             catch { /* keep the last answer */ }
             _app.Post(() =>
             {
                 _chromePolling = false;
-                if (dark is not { } d || d == _chromeDark) return;
-                _chromeDark = d;
-                EnsureChrome();
+                bool changed = dark is { } d && d != _chromeDark || homeDark is { } h && h != _homeDark;
+                if (dark is { } d2) _chromeDark = d2;
+                if (homeDark is { } h2) _homeDark = h2;
+                if (changed) EnsureChrome();
             });
         });
     }
@@ -1019,12 +1042,27 @@ internal sealed class EmulatorSession : IDisposable
         }
 
         bool iosBar = _app.Config.IosStatusBarFor(Title, Frame);
-        string signature = AndroidCutout.Signature(Frame, Display, _app.Config.StatusBarPaddingFactor, iosBar);
+        bool wantsHome = config.IosHomeIndicator != false;
+        string signature = AndroidCutout.Signature(Frame, Display, _app.Config.StatusBarPaddingFactor, iosBar, wantsHome);
         if (signature == config.InstalledCutout || signature == _failedCutout) return;
+        // Changing the overlay of a running emulator relaunches its apps: an emulator that already has one gets the new
+        // one when Android starts (Android has been up for under three minutes), or at "Restart to finish iOS setup".
+        bool queue = config.InstalledCutout != null;
+        if (queue && config.PendingIosSetup == signature && DateTime.UtcNow < _nextPendingCheck) return;
+        _nextPendingCheck = DateTime.UtcNow.AddMinutes(1);
 
         var (frame, display2, instance2, factor, sdk) = (Frame, Display, Instance, _app.Config.StatusBarPaddingFactor, _app.Config.AndroidSdk);
         RunAndroidTask(() =>
         {
+            if (queue && UptimeSeconds(instance2) is not (< 180))
+                return () =>
+                {
+                    if (config.PendingIosSetup == signature) return;
+                    config.PendingIosSetup = signature;
+                    _app.Config.Save();
+                    Log.Write($"'{Title}': iOS safe areas for {frame.Model} queued for the next start ({signature})");
+                    _app.Notify($"{Title}: the iOS home indicator and its safe area are ready. They go in when the emulator next starts, or now with Restart to finish iOS setup in its menu.");
+                };
             var missing = AndroidTools.Missing(sdk);
             if (missing.Count > 0)
                 return () =>
@@ -1033,13 +1071,14 @@ internal sealed class EmulatorSession : IDisposable
                     Log.Write($"'{Title}': missing Android display tools: {string.Join(", ", missing)}");
                     _app.OfferAndroidTools();
                 };
-            var spec = AndroidCutout.Measure(frame, display2, factor, ios: iosBar);
+            var spec = AndroidCutout.Measure(frame, display2, factor, ios: iosBar, withHome: wantsHome);
             string? error = spec == null ? "frame and display orientation differ" : AndroidCutout.Apply(instance2, spec, sdk, iosBar);
             return () =>
             {
                 if (error == null)
                 {
                     config.InstalledCutout = signature;
+                    config.PendingIosSetup = null;
                     _app.Config.Save();
                     Log.Write($"'{Title}': Android cutout matched to {frame.Key} (status bar {spec!.StatusBarHeight}px, side padding {spec.SidePadding}px, cutout {(spec.HasCutout ? "yes" : "none")})");
                     _app.Notify($"{Title}: Android status bar now matches {frame.Model}.");
@@ -1152,6 +1191,30 @@ internal sealed class EmulatorSession : IDisposable
     /// <summary>Android reports device states (made a foldable), so apps get a FoldingFeature.</summary>
     public bool IsFoldable => Display?.Duo?.Foldable == true;
 
+    private DateTime _nextPendingCheck;
+
+    /// <summary>How long Android has been up (seconds), null if it did not say.</summary>
+    private static double? UptimeSeconds(MuMuInstance instance) =>
+        double.TryParse(instance.Shell("cat /proc/uptime").Output.Split(' ')[0], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var s) ? s : null;
+
+    /// <summary>"Restart to finish iOS setup": the emulator restarts and the queued overlay goes in as Android starts.</summary>
+    public void RestartToFinishIosSetup()
+    {
+        if (Instance is not { } instance) return;
+        string title = Title;
+        _app.Notify($"{title}: restarting to finish the iOS setup.");
+        RunAndroidTask(() =>
+        {
+            string? error = MuMuControl.RestartAndWait(instance, TimeSpan.FromMinutes(3));
+            return () =>
+            {
+                Log.Write(error == null ? $"'{title}': restarted to finish the iOS setup" : $"'{title}': restart failed: {error}");
+                _nextPendingCheck = DateTime.MinValue;
+                Sync();
+            };
+        });
+    }
+
     private void InstallPostures()
     {
         var (instance, sdk) = (Instance!, _app.Config.AndroidSdk);
@@ -1212,12 +1275,15 @@ internal sealed class EmulatorSession : IDisposable
             ? new RenderKey(frame.Key, picture.Width, picture.Height, Math.Clamp(_app.Config.Overlap, 0, 8))
             : null;
         _nextPosePoll = DateTime.UtcNow.AddSeconds(4);
+        bool refresh = _app.Config.Instance(Title).DuoOverlay != null;
         bool animating = Pose is { } from && from != pose && BeginAnimation(from, pose);
         _fadeNext = !animating;
         RunAndroidTask(() =>
         {
             var rendered = key is { } k ? FrameRenderer.Render(frame!, k) : null;
-            var (_, output) = instance.Shell(string.Join("; ", IPhoneDuo.Commands(pose, display.Native, display.Duo?.Foldable == true)));
+            var commands = IPhoneDuo.Commands(pose, display.Native, display.Duo?.Foldable == true);
+            if (refresh) commands = [.. commands, IPhoneDuo.RefreshSafeAreas];
+            var (_, output) = instance.Shell(string.Join("; ", commands));
             var now = MuMuControl.QueryDisplay(instance);
             return () =>
             {
@@ -1270,6 +1336,7 @@ internal sealed class EmulatorSession : IDisposable
                 if (pose == Pose) return;
                 SetPose(pose);
                 AdoptPose();
+                if (_app.Config.Instance(Title).DuoOverlay != null) RunAndroidTask(() => { instance.Shell(IPhoneDuo.RefreshSafeAreas); return () => { }; });
                 Sync();
             };
         });

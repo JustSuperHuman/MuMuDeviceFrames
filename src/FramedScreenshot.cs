@@ -59,10 +59,11 @@ internal static class FramedScreenshot
     {
         using var shot = new Bitmap(new MemoryStream(screenshotPng));
         // Light or dark chrome from the very pixels behind it, as on iOS (the screenshot is Android's exact picture).
-        if (chrome != null && shot.Size == chrome.Screen && IosChrome.GlyphArea(chrome) is { } glyphs)
+        if (chrome != null && shot.Size == chrome.Screen)
         {
             using var argb = shot.Clone(new Rectangle(Point.Empty, shot.Size), PixelFormat.Format32bppArgb);
-            chrome = chrome with { DarkGlyphs = IosChrome.IsLight(argb, glyphs) };
+            if (IosChrome.GlyphArea(chrome) is { } glyphs) chrome = chrome with { DarkGlyphs = IosChrome.IsLight(argb, glyphs) };
+            if (chrome.Home) chrome = chrome with { DarkHome = IosChrome.IsLight(argb, IosChrome.HomeArea(chrome)) };
         }
         // iPhone Duo: the screenshot's size says which display was on and which way round, so it always lands in the
         // frame for that; whether the halves were flat or at an angle comes from the frame the caller chose.

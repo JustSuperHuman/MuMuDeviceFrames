@@ -263,7 +263,7 @@ internal static class Diagnostics
             {
                 bool duo = IPhoneDuo.IsDuo(frame);
                 var shownPose = IPhoneDuo.Detect(display);
-                bool home = IosChrome.HomeIndicator(frame) && (!duo || shownPose != null);
+                bool home = IosChrome.HomeIndicator(frame, config.Instance(title).DuoOverlay, config.Instance(title).InstalledCutout) && (!duo || shownPose != null);
                 var kind = IosChrome.KindFor(frame, shownPose);
                 if (kind != ChromeKind.None || home)
                     chrome = new ChromeState(kind, home, duo && shownPose is { } shown ? IPhoneDuo.ScreenSize(shown) : display.Native, display.DensityOverride ?? display.Density,

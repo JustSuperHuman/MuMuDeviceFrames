@@ -9,7 +9,7 @@ internal enum ChromeKind { None, DuoRailClosed, DuoRailOpen, DuoCorner }
 
 /// <summary>One state of that chrome: what, the home indicator or not, on which screen (native pixels), at what
 /// density, light or dark, the time.</summary>
-internal sealed record ChromeState(ChromeKind Kind, bool Home, Size Screen, int Density, bool DarkGlyphs, string Time);
+internal sealed record ChromeState(ChromeKind Kind, bool Home, Size Screen, int Density, bool DarkGlyphs, string Time, bool DarkHome = false);
 
 /// <summary>
 /// Draws the iOS chrome the tool owns, in iOS points (vector shapes, sharp at any size). The iPhone Duo's status is one
@@ -43,6 +43,20 @@ internal static class IosChrome
 
     /// <summary>The trailing safe area of the rail, as Apple's renders show it (Mail's content ends 84 pt in).</summary>
     public const int RailPt = 84;
+
+    /// <summary>The upright poses' top safe area: the corner element ends 63.4 pt down, content starts 4.6 pt below.</summary>
+    public const int UprightTopPt = 68;
+
+    /// <summary>iOS's home indicator safe area.</summary>
+    public const int HomeIndicatorPt = 34;
+
+    /// <summary>Where the home indicator sits (native pixels), for its light or dark: what is under it decides.</summary>
+    public static Rectangle HomeArea(ChromeState state)
+    {
+        float px = state.Density / 160f;
+        int w = (int)(150 * px), h = (int)(24 * px);
+        return new Rectangle(state.Screen.Width / 2 - w / 2, state.Screen.Height - h, w, h);
+    }
 
     /// <summary>
     /// Where the time and ring sit, in the screen's native pixels: the content behind them decides light or dark
@@ -99,11 +113,13 @@ internal static class IosChrome
     };
 
     /// <summary>
-    /// The home indicator goes with the bottom safe area that keeps apps clear of it; drawn without one it sits on top of
-    /// tab bars. Android does not report that inset yet (a display cutout cannot carry it: Android letterboxes apps that
-    /// are not edge to edge away from it), so no frame gets the indicator until it does.
+    /// The home indicator goes with the bottom safe area that keeps apps clear of it (drawn without one it sits on top
+    /// of tab bars): on the iPhone Duo once its safe-area overlay (duo-v5) is in, on Face ID iPhones once theirs has the
+    /// home-indicator safe area.
     /// </summary>
-    public static bool HomeIndicator(FrameInfo frame) => false;
+    public static bool HomeIndicator(FrameInfo frame, string? duoOverlay, string? iphoneOverlay) => IPhoneDuo.IsDuo(frame)
+        ? duoOverlay?.StartsWith("duo-v5", StringComparison.Ordinal) == true
+        : AndroidCutout.HasHomeIndicator(frame) && iphoneOverlay?.EndsWith(AndroidCutout.HomeMark, StringComparison.Ordinal) == true;
 
     /// <summary>Draws onto <paramref name="g"/>: <paramref name="origin"/> is the screen's top-left on the target,
     /// <paramref name="scale"/> target pixels per native pixel.</summary>
@@ -120,7 +136,7 @@ internal static class IosChrome
             // 134 x 5 pt, 8 pt above the bottom edge of the display as it is held, black on light apps, white on dark.
             float w = 134 * pt, h = 5 * pt;
             using var path = Pill(new RectangleF(screen.Left + screen.Width / 2 - w / 2, screen.Bottom - (8 + 5) * pt, w, h));
-            using var brush = new SolidBrush(ink);
+            using var brush = new SolidBrush(state.DarkHome ? Color.Black : Color.White);
             g.FillPath(brush, path);
         }
         var element = state.Kind switch

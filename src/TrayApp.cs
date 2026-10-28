@@ -529,6 +529,12 @@ internal sealed class TrayApp : ApplicationContext
         }, hint: instance.IosStatusBar != null ? "This emulator only" : iosDefault && !Config.IosStatusBar ? "On for iPhone frames" : "Following global");
         iosBar.Enabled = connected;
         items.Add(iosBar);
+        if (instance.PendingIosSetup != null)
+        {
+            var finish = new MenuItem("Restart to finish iOS setup", null, session.RestartToFinishIosSetup);
+            finish.Enabled = connected;
+            items.Add(finish);
+        }
 
         if (session is not { Display: { } display, Frame: { } frame } || instance.FitToFrame) return;
         items.Add(new MenuSeparator());

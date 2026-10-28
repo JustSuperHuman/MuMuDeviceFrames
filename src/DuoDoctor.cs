@@ -106,8 +106,15 @@ internal static class DuoDoctor
             else Add(Outcome.Failed, $"Could not put the pose back to {IPhoneDuo.Variant(pose)}.");
         }
 
-        // 4. Notes: root and the tray app.
-        if (MuMuControl.GetSetting(instance, "root_permission") == "true") Add(Outcome.Note, "MuMu root permission is on (only the setup needs it).");
+        // 4. iOS's navigation gestures (MuMu switches them off at every boot; the tray app turns them back on).
+        bool rooted = MuMuControl.GetSetting(instance, "root_permission") == "true";
+        if (DuoSetup.GesturesOn(instance)) Add(Outcome.Ok, "Navigation gestures on (swipe up for home, from an edge for back).");
+        else if (!rooted) Add(Outcome.Note, "Navigation gestures off: they need MuMu's root permission (on for new iPhone Duos).");
+        else if (!repair) Add(Outcome.Failed, "Navigation gestures are off.");
+        else if (DuoSetup.EnableGestures(instance) is { } gestureError) Add(Outcome.Failed, $"Could not turn the navigation gestures on: {gestureError}");
+        else Add(Outcome.Fixed, "Turned the navigation gestures back on.");
+
+        // 5. Notes: the tray app.
         if (!TrayApp.IsRunning) Add(Outcome.Note, "The tray app is not running, so nothing heals the pose after an Android restart.");
         return findings;
     }

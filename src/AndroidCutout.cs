@@ -21,20 +21,29 @@ internal static class AndroidCutout
 
     /// <summary>Cutout and corner measurements in the emulator's native pixels.</summary>
     /// <param name="Ios">The status bar height is iOS's safe area for that iPhone (written even without an island).</param>
-    internal sealed record Spec(string? CutoutPath, string? CutoutRect, int StatusBarHeight, int CornerRadius, int SidePadding, Rectangle? Cutout, bool Ios = false)
+    /// <param name="Home">iOS's home-indicator safe area (px), a waterfall on the panel's bottom edge; 0 for none.</param>
+    internal sealed record Spec(string? CutoutPath, string? CutoutRect, int StatusBarHeight, int CornerRadius, int SidePadding, Rectangle? Cutout, bool Ios = false, int Home = 0)
     {
         public bool HasCutout => CutoutPath != null;
     }
 
-    public static string Signature(FrameInfo frame, AndroidDisplay display, double paddingFactor, bool hideNotificationIcons) =>
-        string.Create(CultureInfo.InvariantCulture, $"{Version}|{frame.Key}|{display.Native.Width}x{display.Native.Height}@{display.Density}|{paddingFactor:0.###}|{(hideNotificationIcons ? "ios" : "android")}");
+    /// <param name="home">The emulator wants iOS's home indicator and its safe area (Face ID iPhones only).</param>
+    public static string Signature(FrameInfo frame, AndroidDisplay display, double paddingFactor, bool hideNotificationIcons, bool home = true) =>
+        string.Create(CultureInfo.InvariantCulture, $"{Version}|{frame.Key}|{display.Native.Width}x{display.Native.Height}@{display.Density}|{paddingFactor:0.###}|{(hideNotificationIcons ? "ios" : "android")}")
+        + (hideNotificationIcons && home && HasHomeIndicator(frame) ? HomeMark : "");
+
+    /// <summary>In a signature: the overlay gives apps iOS's home-indicator safe area (and the indicator is drawn).</summary>
+    public const string HomeMark = "|home";
+
+    /// <summary>iPhones with Face ID have the home indicator; Touch ID ones (SE, 8, 6s) do not.</summary>
+    public static bool HasHomeIndicator(FrameInfo frame) => DeviceSpecs.IosSafeArea(frame.Category, frame.Model) is { Bottom: > 0 };
 
     /// <summary>
     /// Reads the geometry straight from the frame: whatever the frame paints *inside* the screen outline near the top is
     /// the cutout, and the rows it takes the screen to reach full width give the corner size.
     /// </summary>
     /// <param name="ios">With the iOS-style chrome on an iPhone frame: the model's iOS safe areas (status bar, home indicator).</param>
-    public static Spec? Measure(FrameInfo frame, AndroidDisplay display, double paddingFactor, bool ios = false)
+    public static Spec? Measure(FrameInfo frame, AndroidDisplay display, double paddingFactor, bool ios = false, bool withHome = true)
     {
         var source = FrameSource.Load(frame);
         var screen = source.Screen;
@@ -115,17 +124,20 @@ internal static class AndroidCutout
             statusBar = Math.Max(minStatusBar, (int)Math.Round((bottom + margin) * sy));
         }
 
-        // Only the top: a bottom safe area given as a cutout makes Android letterbox every app that is not edge to edge
-        // (a black band under it), so the home indicator's inset has to come from a navigation bar instead.
+        // The bottom: iOS's 34 pt home-indicator safe area as a waterfall on the panel's bottom edge, the same kind of
+        // cutout the iPhone Duo's safe areas are. Apps that are not edge to edge are kept clear of it (letterboxed), as on
+        // iOS for apps built for older SDKs.
         bool iosSafe = false;
+        int home = 0;
         if (ios && DeviceSpecs.IosSafeArea(frame.Category, frame.Model) is { } safe)
         {
             iosSafe = true;
-            // iOS's own number: the status bar safe area of that iPhone.
+            // iOS's own numbers: the status bar safe area of that iPhone, and 34 pt for the home indicator.
             int density = display.DensityOverride ?? display.Density;
             statusBar = (int)Math.Round(safe.Top * density / 160.0);
+            if (withHome) home = (int)Math.Round(safe.Bottom * density / 160.0);
         }
-        return new Spec(path, rect, statusBar, (int)Math.Round(cornerExtent * 0.8), (int)Math.Round(cornerExtent * paddingFactor), cutout, iosSafe);
+        return new Spec(path, rect, statusBar, (int)Math.Round(cornerExtent * 0.8), (int)Math.Round(cornerExtent * paddingFactor), cutout, iosSafe, home);
     }
 
     private static string Num(double value) => value.ToString("0.#", CultureInfo.InvariantCulture);
@@ -145,6 +157,7 @@ internal static class AndroidCutout
         if (spec.HasCutout || spec.Ios)
             foreach (var name in new[] { "status_bar_height_default", "status_bar_height_portrait", "quick_qs_offset_height" })
                 framework.AppendLine($"    <dimen name=\"{name}\">{spec.StatusBarHeight}px</dimen>");
+        if (spec.Home > 0) framework.AppendLine($"    <dimen name=\"waterfall_display_bottom_edge_size\">{spec.Home}px</dimen>");
         foreach (var name in new[] { "rounded_corner_radius", "rounded_corner_radius_top", "rounded_corner_radius_bottom" })
             framework.AppendLine($"    <dimen name=\"{name}\">{spec.CornerRadius}px</dimen>");
 
@@ -164,24 +177,31 @@ internal static class AndroidCutout
     }
 
     /// <summary>What <see cref="ApplyDuo"/> installs, recorded so a restart of this app does not install it again.</summary>
-    public static string DuoSignature(int rail, string edge) => $"duo-v3|{rail}|{edge}";
+    public static string DuoSignature(DuoSafeAreas areas) => $"duo-v5|{areas}";
 
     /// <summary>
     /// The iPhone Duo's part. Android's status bar is emptied (no clock, no notification icons) and 0 px tall, so the
-    /// tool's iOS chrome is all there is and the rail poses have no top inset. The rail is a <paramref name="rail"/> px
-    /// display cutout of the "waterfall" kind along one panel edge (<paramref name="edge"/>, see
-    /// <see cref="IPhoneDuo.RailEdge"/>): every app gets it as a real display-cutout inset, on the right in the rail
-    /// poses and at the top in the upright ones (where it keeps app content clear of the corner status element), with
-    /// no app restarted on a pose change. Apps that are not edge to edge are kept clear of it, as iOS keeps apps built
-    /// for older SDKs clear of the Duo's status area. Android reads a cutout only when the display starts: the
-    /// emulator has to restart once after this changes.
+    /// tool's iOS chrome is all there is. The safe areas are display cutouts of the "waterfall" kind: every app gets
+    /// them as real display-cutout insets, and they are per pose. Android picks the waterfall from resources for the
+    /// display's configuration whenever the display turns on (<see cref="IPhoneDuo.RefreshSafeAreas"/>), so the rail
+    /// poses (the default values) and the open display upright (values-w600dp-port, 626 dp wide; closed is 466 dp)
+    /// each get their own edges, without any app relaunched. Waterfalls are given on the panel's own edges, so each set
+    /// is turned back by its poses' display rotation (<see cref="DuoSafeAreas"/>). Apps that are not edge to edge are
+    /// kept clear of them, as iOS keeps apps built for older SDKs clear of the Duo's status area.
     /// </summary>
-    public static string? ApplyDuo(MuMuInstance instance, string? sdkRoot, int rail, string edge)
+    public static string? ApplyDuo(MuMuInstance instance, string? sdkRoot, DuoSafeAreas areas)
     {
-        string framework = $"    <dimen name=\"status_bar_height_default\">0px</dimen>\n";
-        foreach (var side in new[] { "left", "top", "right", "bottom" })
-            framework += $"    <dimen name=\"waterfall_display_{side}_edge_size\">{(side == edge ? rail : 0)}px</dimen>\n";
-        if (InstallOverlay(instance, FrameworkOverlay, "android", "Device frame cutout", framework, sdkRoot) is { } error) return error;
+        static string Waterfall((int Left, int Top, int Right, int Bottom) natural) =>
+            $"    <dimen name=\"waterfall_display_left_edge_size\">{natural.Left}px</dimen>\n" +
+            $"    <dimen name=\"waterfall_display_top_edge_size\">{natural.Top}px</dimen>\n" +
+            $"    <dimen name=\"waterfall_display_right_edge_size\">{natural.Right}px</dimen>\n" +
+            $"    <dimen name=\"waterfall_display_bottom_edge_size\">{natural.Bottom}px</dimen>\n";
+        var folders = new List<(string?, string)>
+        {
+            (null, "    <dimen name=\"status_bar_height_default\">0px</dimen>\n" + Waterfall(areas.RailNatural)),
+            ("w600dp-port", $"    <dimen name=\"status_bar_height_default\">{areas.UprightTop}px</dimen>\n" + Waterfall(areas.UprightNatural)),
+        };
+        if (InstallOverlay(instance, FrameworkOverlay, "android", "Device frame cutout", folders, sdkRoot) is { } error) return error;
         const string values = "    <integer name=\"max_notif_static_icons\">0</integer>\n" +
                               "    <dimen name=\"overflow_dot_radius\">0px</dimen>\n" +
                               "    <dimen name=\"status_bar_clock_size\">0px</dimen>\n";
@@ -192,8 +212,11 @@ internal static class AndroidCutout
     /// Builds a resource overlay for <paramref name="target"/> from <c>values.xml</c> entries, signs it with the AOSP
     /// platform test key, installs and enables it, and checks Android really activated it. Null on success.
     /// </summary>
-    /// <param name="qualifier">Resource qualifier for the values (e.g. <c>w600dp-port</c>); null for every configuration.</param>
-    public static string? InstallOverlay(MuMuInstance instance, string package, string target, string label, string values, string? sdkRoot, string? qualifier = null)
+    public static string? InstallOverlay(MuMuInstance instance, string package, string target, string label, string values, string? sdkRoot) =>
+        InstallOverlay(instance, package, target, label, [(null, values)], sdkRoot);
+
+    /// <param name="folders">Values per resource qualifier (e.g. <c>w600dp-port</c>; null for every configuration).</param>
+    public static string? InstallOverlay(MuMuInstance instance, string package, string target, string label, IReadOnlyList<(string? Qualifier, string Values)> folders, string? sdkRoot)
     {
         var missing = AndroidTools.Missing(sdkRoot);
         if (missing.Count > 0) return $"Missing Android display tools: {string.Join(", ", missing)}. Use Install / repair Android display tools in the tray menu.";
@@ -209,8 +232,12 @@ internal static class AndroidCutout
         try
         {
             string dir = Path.Combine(work, package);
-            string folder = qualifier == null ? "values" : $"values-{qualifier}";
-            Directory.CreateDirectory(Path.Combine(dir, "res", folder));
+            foreach (var (qualifier, values) in folders)
+            {
+                string folder = qualifier == null ? "values" : $"values-{qualifier}";
+                Directory.CreateDirectory(Path.Combine(dir, "res", folder));
+                File.WriteAllText(Path.Combine(dir, "res", folder, "values.xml"), $"<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<resources>\n{values}</resources>\n");
+            }
             File.WriteAllText(Path.Combine(dir, "AndroidManifest.xml"),
                 $"""
                  <?xml version="1.0" encoding="utf-8"?>
@@ -219,7 +246,6 @@ internal static class AndroidCutout
                      <application android:hasCode="false" android:label="{label}" />
                  </manifest>
                  """);
-            File.WriteAllText(Path.Combine(dir, "res", folder, "values.xml"), $"<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<resources>\n{values}</resources>\n");
 
             string compiled = Path.Combine(dir, "compiled.zip"), unsigned = Path.Combine(dir, "unsigned.apk"), aligned = Path.Combine(dir, "aligned.apk"), apk = Path.Combine(dir, "overlay.apk");
             var steps = new (string Name, Func<(int ExitCode, string Output)> Run)[]

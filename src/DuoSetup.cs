@@ -65,7 +65,7 @@ internal static class DuoSetup
             instance = MuMuControl.Instance(manager, index);
         }
         if (instance == null || !MuMuControl.WaitForBoot(instance, TimeSpan.FromMinutes(4))) return "The new emulator did not finish starting.";
-        return Run(instance, name, sdkRoot, progress, rootAfter: "false");
+        return Run(instance, name, sdkRoot, progress, rootAfter: "true"); // the gestures need root at every boot
     }
 
     /// <summary>"iPhone Duo", or "iPhone Duo 2" and so on when that name is taken.</summary>
@@ -126,20 +126,56 @@ internal static class DuoSetup
             Say("installing the postures overlay");
             if (InstallPostures(instance, sdkRoot) is { } overlayError) return overlayError;
         }
+        Say("turning on iOS's navigation gestures");
+        if (EnableGestures(instance) is { } gestureError) Say($"gestures: {gestureError}");
+        display = MuMuControl.QueryDisplay(instance) ?? display;
         instance.Shell(string.Join("; ", IPhoneDuo.Commands(DuoPose.Folded, display.Native, foldable: true)));
         Say("done: CLOSED, HALF_OPENED and OPENED, folded");
         return null;
     }
 
+    /// <summary>True when Android's gesture navigation is on (swipe up from the bottom for home, from an edge for back).</summary>
+    public static bool GesturesOn(MuMuInstance instance) =>
+        instance.Shell("getprop qemu.hw.mainkeys").Output.Trim() == "0" && instance.Shell("settings get secure navigation_mode").Output.Trim() == "2";
+
+    /// <summary>
+    /// iOS's navigation: swipe up from the bottom edge for home, in from a side edge for back. That is Android's gesture
+    /// navigation, which MuMu switches off at every boot (qemu.hw.mainkeys=1, "no navigation bar"). As root: the property
+    /// back to 0, gesture mode, and Android's framework restarted so it reads them (apps restart; the emulator does not).
+    /// On this Android image no navigation bar appears (Android 15 leaves it to the launcher, and MuMu's launcher draws
+    /// none), so it gives no inset: the home indicator's inset is the safe-area overlay's. Null when on.
+    /// </summary>
+    public static string? EnableGestures(MuMuInstance instance)
+    {
+        if (GesturesOn(instance)) return null;
+        if (!instance.Shell("id").Output.Contains("uid=0(") && !TryAdbRoot(instance)) return "adb root did not take (MuMu root permission is off?).";
+        string before = instance.Shell("pidof com.android.systemui").Output.Trim();
+        instance.Shell("setprop qemu.hw.mainkeys 0; cmd overlay enable-exclusive --category com.android.internal.systemui.navbar.gestural; stop; sleep 2; start");
+        for (int i = 0; i < 60; i++)
+        {
+            Thread.Sleep(2000);
+            MuMuControl.Reconnect(instance);
+            string now = instance.Shell("pidof com.android.systemui").Output.Trim();
+            if (now.Length == 0 || now == before || instance.Shell("getprop sys.boot_completed").Output.Trim() != "1") continue;
+            Thread.Sleep(5000); // SystemUI and the launcher settle
+            return GesturesOn(instance) ? null : "Android came back without gesture navigation.";
+        }
+        return "Android's framework did not come back after the restart.";
+    }
+
     /// <summary>adbd as root (MuMu's root on Android 15); true once a shell answers as uid 0.</summary>
     private static bool TryAdbRoot(MuMuInstance instance)
     {
+        // adb root restarts adbd, which drops adb reverse rules (a dev server's Metro port): put them back.
+        var reverses = MuMuControl.ParseReverses(instance.Adb("reverse", "--list").Output);
         instance.Adb("root");
         for (int i = 0; i < 20; i++)
         {
             Thread.Sleep(1000);
             MuMuControl.Reconnect(instance);
-            if (instance.Shell("id").Output.Contains("uid=0(")) return true;
+            if (!instance.Shell("id").Output.Contains("uid=0(")) continue;
+            foreach (var (remote, local) in reverses) instance.Adb("reverse", remote, local);
+            return true;
         }
         return false;
     }

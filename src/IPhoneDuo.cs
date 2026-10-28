@@ -231,8 +231,7 @@ internal static class IPhoneDuo
     {
         bool turned = physical.Width < physical.Height;
         // wm size is the display in the panel's own orientation, the same for both ways round of the inner display;
-        // the rotation turns it. On MuMu's turned panel the rail poses use 270 (not 90): the rail's safe area is a
-        // display cutout on one edge of the panel (RailEdge), and 270 is the rotation that puts that edge on the right.
+        // the rotation turns it: on MuMu's turned panel 1 shows it landscape, 0 upright (see RotationFor).
         var landscape = IsInner(pose) ? InnerScreen : OuterScreen;
         var natural = turned ? new Size(landscape.Height, landscape.Width) : landscape;
         string[] display =
@@ -248,16 +247,40 @@ internal static class IPhoneDuo
             : [$"cmd device_state state {StateFor(pose)}", "settings delete global display_features", .. display];
     }
 
-    /// <summary>The display rotation for a pose: the rail poses turn the panel's <see cref="RailEdge"/> to the right
-    /// (270 on MuMu's turned panel, 0 on a landscape one), the upright poses turn it to the top (0, or 90).</summary>
-    public static int RotationFor(DuoPose pose, bool turned) => turned ? (IsUpright(pose) ? 0 : 3) : (IsUpright(pose) ? 1 : 0);
+    /// <summary>
+    /// The display rotation for a pose: on MuMu's turned panel 90 for the rail poses and 0 upright; on a landscape panel
+    /// 0 and 90. <see cref="DuoSafeAreas"/> turns each pose group's insets back onto the panel's edges with it.
+    /// </summary>
+    public static int RotationFor(DuoPose pose, bool turned) => turned ? (IsUpright(pose) ? 0 : 1) : (IsUpright(pose) ? 1 : 0);
 
     /// <summary>
-    /// The panel edge (natural orientation) that carries the iPhone Duo's rail as a display cutout: shown on the right
-    /// in the rail poses and at the top in the upright ones (<see cref="RotationFor"/>). On MuMu's turned panel that is
-    /// the top edge; on a landscape panel, the right edge.
+    /// Which panel edge (natural orientation: 0 left, 1 top, 2 right, 3 bottom) shows on a given side of the display
+    /// (same numbering) at a rotation, as measured on MuMu: at 90 the panel's top shows on the left, at 270 on the right.
     /// </summary>
-    public static string RailEdge(Size physical) => physical.Width < physical.Height ? "top" : "right";
+    public static int PanelEdge(int side, int rotation) => rotation switch
+    {
+        1 => (side + 1) % 4,  // 90: left <- top, top <- right, right <- bottom, bottom <- left
+        2 => (side + 2) % 4,
+        3 => (side + 3) % 4,  // 270: right <- top, bottom <- right, left <- bottom, top <- left
+        _ => side,
+    };
+
+    /// <summary>Display-side insets (left, top, right, bottom) turned into panel-edge waterfall sizes for a rotation.</summary>
+    public static (int Left, int Top, int Right, int Bottom) ToPanel((int Left, int Top, int Right, int Bottom) shown, int rotation)
+    {
+        var panel = new int[4];
+        int[] sides = [shown.Left, shown.Top, shown.Right, shown.Bottom];
+        for (int side = 0; side < 4; side++) panel[PanelEdge(side, rotation)] = sides[side];
+        return (panel[0], panel[1], panel[2], panel[3]);
+    }
+
+    /// <summary>
+    /// Android re-reads the display cutout (the safe areas) when the display turns on, for the configuration it is in
+    /// then; turning it off and on again after a pose switch gives the new pose its own edges. 0.4 s off is the least
+    /// that works (0.2 s is cancelled before the display goes off); the fold animation covers it. No app is relaunched
+    /// (they pause and resume, as for any screen off).
+    /// </summary>
+    public const string RefreshSafeAreas = "input keyevent 223; sleep 0.5; input keyevent 224";
 
     /// <summary>
     /// One shell line for everything <see cref="DuoDevice"/> holds; <see cref="ParseDevice"/> reads its output.

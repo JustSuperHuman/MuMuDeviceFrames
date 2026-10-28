@@ -123,9 +123,17 @@ icons further in or out.
 **iOS-style status bar** in the tray menu (or `IosStatusBar` in the config) applies to every emulator as it
 starts; the bezel menu can override it for one emulator. It turns on the cutout matching above by itself, empties
 Android's status bar through SystemUI's icon blocklist (`settings put secure icon_blacklist …`) and the SystemUI overlay
-(no notification icons, overflow dot or clock — Android 15's clock ignores the blocklist), then draws
+(no notification icons, overflow dot or clock; Android 15's clock ignores the blocklist), then draws
 the iPhone bar in a click-through window over the picture. Light/dark follows the foreground app's
-`LIGHT_STATUS_BARS` request, polled once a second. `StatusBarClock` sets the time (`auto`, `24h`, or fixed text such as
+`LIGHT_STATUS_BARS` request, polled once a second. It is on by default for iPhone frames.
+
+Android's status bar is then as tall as that iPhone's iOS safe area (62 pt on the 16 Pro to 17 Pro and Air, 59 on the
+14 Pro to 16 Plus, 44 to 50 on notch phones, 20 on the SE and 8 family). Face ID iPhones also get iOS's home indicator,
+drawn by the app (black or white from the pixels under it), and its 34 pt safe area: a display cutout along the bottom
+edge, so apps get it as a real inset. Apps that are not edge to edge are kept clear of it, as iOS keeps apps built for
+older SDKs clear. Changing an emulator's overlay relaunches its apps, so on an emulator that already had one the change
+waits for its next start (a toast says so, and **Restart to finish iOS setup** in its menu does it now).
+`"IosHomeIndicator": false` under that emulator in `Instances` keeps Android's bottom edge as it is. `StatusBarClock` sets the time (`auto`, `24h`, or fixed text such as
 `9:41`); `StatusBarFont` picks the font (SF Pro if installed, otherwise Segoe UI Semibold). Works best together with the
 cutout matching above. Unticking it, exiting, or `--restore` gives Android its own status bar back.
 
@@ -232,9 +240,24 @@ Open: rounded on all four corners, with a faint crease down the middle of the sc
 and deeper. The crease is a separate `glass.png` layer, shown in a click-through window, so taps along the middle
 still reach the app. `MuMuDeviceFrames.exe --duo-frames <folder>` writes the frames to a folder.
 
-The Duo leaves the status bar to the app: the JustGains app hides Android's status bar on these sizes and draws the
-time, status and front camera in its own rail. So a Duo frame never installs the cutout overlays or draws the
-iOS-style status bar, whatever those switches say. The camera is not part of the frame.
+**iOS on the Duo.** There is no iPhone status bar on the Duo: as in Apple's renders, the status is one element, the
+time and a ring (battery as the arc over the top, Wi-Fi inside, cellular dots along its open bottom). It runs down the
+trailing rail in Closed (under the outer camera), Open and Book, and sits in the top-trailing corner in Open portrait
+and Tabletop. Its positions and sizes are measured on Apple's HIG renders and match them within 1 pt. The home
+indicator is drawn in every pose. Light or dark comes from the pixels behind each.
+
+Every app gets the Duo's safe areas as real Android insets: in Closed, Open and Book 84 pt on the right and 34 pt at the
+bottom, in Open portrait and Tabletop 68 pt at the top and 34 pt at the bottom. They are display cutouts of the
+"waterfall" kind, with one set for the rail poses and one for the open display upright (resources for that
+configuration); after each pose switch the display goes off and on for half a second, under the fold animation,
+because that is when Android reads the cutout for the configuration it is in. No app is relaunched by a pose switch.
+Apps that are not edge to edge are kept clear of them (letterboxed). Installing them the first time relaunches open
+apps once.
+
+iOS's navigation gestures work too: swipe up from the bottom edge for home, in from a side edge for back. That is
+Android's gesture navigation, which MuMu turns off at every boot; the tray app turns it back on (a restart of Android's
+framework, not of the emulator) and needs MuMu's root permission for it, which new iPhone Duos keep on. Android 15 hands
+the navigation bar to the launcher and MuMu's launcher draws none, so the gestures add no inset of their own.
 
 ## Configuration
 
@@ -299,7 +322,10 @@ it. A second window is needed either way — and with one, nothing has to run in
 
 - OBS *Window Capture* of the emulator won't include the frame (it is a separate window). Use display or region capture.
 - In landscape Android keeps its normal status bar and moves the cutout to the side, as a real phone does; only the
-  portrait status-bar height is overridden.
+  portrait status-bar height is overridden. On iPhone frames the home indicator's bottom cutout moves to a side too.
+- Android draws nothing under a cutout for apps that keep clear of it, so the home indicator's 34 pt (and on the Duo
+  the rail) show as a band of the app's window background, often black, where iOS would show the app's own background.
+- Navigation gestures on iPhone frames need MuMu's root permission, which this app does not turn on for you.
 - Frame variants with baked-in shadows take mouse input on the shadow too (any pixel with alpha).
 - Windows only; MuMu Player 12 (`MuMuNxDevice.exe`) is what it was written against. Older MuMu builds are matched by
   process name and the same `nemuwin` render surface, untested.
