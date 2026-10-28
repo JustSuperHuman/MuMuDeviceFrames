@@ -13,7 +13,8 @@ internal static class Native
 
     public const int WM_NCDESTROY = 0x0082, WM_MOUSEACTIVATE = 0x0021, WM_MOUSEMOVE = 0x0200, WM_LBUTTONDOWN = 0x0201, WM_LBUTTONUP = 0x0202,
         WM_LBUTTONDBLCLK = 0x0203, WM_RBUTTONUP = 0x0205, WM_CAPTURECHANGED = 0x0215, WM_HOTKEY = 0x0312, WM_SYSCOMMAND = 0x0112;
-    public const int WM_COPYDATA = 0x004A;
+    public const int WM_COPYDATA = 0x004A, WM_MOUSELEAVE = 0x02A3;
+    public const uint TME_LEAVE = 0x00000002;
     public const int MA_NOACTIVATE = 3;
     public const int SC_MINIMIZE = 0xF020;
 
@@ -38,6 +39,7 @@ internal static class Native
     [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
     [StructLayout(LayoutKind.Sequential)] public struct COPYDATASTRUCT { public IntPtr DataId; public int ByteCount; public IntPtr Data; }
     [StructLayout(LayoutKind.Sequential)] public struct SIZE { public int Cx, Cy; }
+    [StructLayout(LayoutKind.Sequential)] public struct TRACKMOUSEEVENT { public int Size; public uint Flags; public IntPtr Window; public uint HoverTime; }
     [StructLayout(LayoutKind.Sequential, Pack = 1)] public struct BLENDFUNCTION { public byte BlendOp, BlendFlags, SourceConstantAlpha, AlphaFormat; }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -84,6 +86,11 @@ internal static class Native
     [DllImport("user32.dll")] public static extern bool RegisterHotKey(IntPtr hwnd, int id, uint mods, uint vk);
     [DllImport("user32.dll")] public static extern bool UnregisterHotKey(IntPtr hwnd, int id);
     [DllImport("user32.dll")] public static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint flags);
+    [DllImport("user32.dll")] public static extern bool TrackMouseEvent(ref TRACKMOUSEEVENT track);
+    [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr hwnd);
+    /// <summary>Changes only the window-wide opacity of a layered window, keeping its bitmap (for fades).</summary>
+    [DllImport("user32.dll", EntryPoint = "UpdateLayeredWindow")]
+    public static extern bool UpdateLayeredWindowAlpha(IntPtr hwnd, IntPtr dstDc, IntPtr dst, IntPtr size, IntPtr srcDc, IntPtr src, uint key, ref BLENDFUNCTION blend, uint flags);
     [DllImport("user32.dll")] public static extern bool GetMonitorInfoW(IntPtr monitor, ref MONITORINFO info);
     [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr hwnd, IntPtr dc, uint flags);
     [DllImport("user32.dll")] public static extern bool PostMessageW(IntPtr hwnd, int msg, IntPtr w, IntPtr l);

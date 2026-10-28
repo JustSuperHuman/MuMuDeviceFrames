@@ -17,6 +17,16 @@ internal sealed class InstanceConfig
 
     /// <summary>Per-emulator override of <see cref="AppConfig.IosStatusBar"/>. Null = follow the global setting.</summary>
     public bool? IosStatusBar { get; set; }
+
+    /// <summary>
+    /// Make the emulator the chosen frame's device: its native resolution and real density (restarts the emulator when
+    /// the resolution changes). On by default.
+    /// </summary>
+    public bool FitToFrame { get; set; } = true;
+
+    /// <summary>iPhone Duo pose this emulator is kept in (healed after Android restarts). Null until it has one.</summary>
+    [JsonConverter(typeof(JsonStringEnumConverter))]
+    public DuoPose? DuoPose { get; set; }
 }
 
 internal sealed class AppConfig
@@ -60,6 +70,12 @@ internal sealed class AppConfig
 
     /// <summary>Half opens the iPhone Duo like a book, or opens it flat again. Empty disables the hotkey.</summary>
     public string DuoHalfHotkey { get; set; } = "Ctrl+Alt+B";
+
+    /// <summary>Modifiers for the five pose hotkeys, followed by 1 to 5 (closed, open, book, open portrait, tabletop).</summary>
+    public string DuoPoseHotkeys { get; set; } = "Ctrl+Alt";
+
+    /// <summary>The pose control beside an iPhone Duo frame.</summary>
+    public bool DuoPoseControls { get; set; } = true;
 
     /// <summary>Last emulator brought to the front, used when an Expo hotkey runs from another app.</summary>
     public string? LastActiveEmulator { get; set; }

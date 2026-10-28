@@ -58,10 +58,9 @@ internal static class FramedScreenshot
     public static Bitmap Compose(FrameInfo frame, byte[] screenshotPng, string? background, StatusBar? statusBar = null)
     {
         using var shot = new Bitmap(new MemoryStream(screenshotPng));
-        // iPhone Duo: the screenshot's size says which display was on, so it always lands in a frame for that display
-        // (open and half open share the inner one; the caller's choice between them stands).
-        if (IPhoneDuo.IsDuo(frame) && IPhoneDuo.PoseForScreen(shot.Size) is { } pose && IPhoneDuo.PoseOf(frame) is { } shown
-            && IPhoneDuo.IsInner(shown) != IPhoneDuo.IsInner(pose))
+        // iPhone Duo: the screenshot's size says which display was on and which way round, so it always lands in the
+        // frame for that; whether the halves were flat or at an angle comes from the frame the caller chose.
+        if (IPhoneDuo.IsDuo(frame) && IPhoneDuo.ForShot(IPhoneDuo.PoseOf(frame), shot.Size) is { } pose && pose != IPhoneDuo.PoseOf(frame))
             frame = DuoFrames.Frame(AppConfig.BuiltInFramesRoot, pose);
 
         var source = FrameSource.Load(frame);

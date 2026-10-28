@@ -16,11 +16,12 @@ namespace MuMuDeviceFrames;
 /// </summary>
 internal static class DuoFrames
 {
-    public const string Version = "MuMuDeviceFrames iPhone Duo frames v2";
+    public const string Version = "MuMuDeviceFrames iPhone Duo frames v3";
 
     private const int Glass = 24, Gasket = 3, Rim = 12;     // black border, dark seal, titanium band (13 pt in all)
-    private const int Border = Glass + Gasket + Rim;
-    private const int HingeOut = 30, HingeIn = 60, HingeInset = 21; // barrel: proud of the body, tucked under it, short of the ends
+    public const int Border = Glass + Gasket + Rim;
+    public const int HingeOut = 30;
+    private const int HingeIn = 60, HingeInset = 21; // barrel: proud of the body, tucked under it, short of the ends
     private const int Pad = 48;                              // transparent margin around the body
     private const int CreaseWidth = 132, HalfCreaseWidth = 216; // 44 pt band, almost invisible head-on; 72 pt half open
 
@@ -52,7 +53,7 @@ internal static class DuoFrames
     public static List<FrameInfo> Ensure(string root)
     {
         var frames = new List<FrameInfo>();
-        foreach (var pose in Enum.GetValues<DuoPose>())
+        foreach (var pose in IPhoneDuo.Poses)
         {
             string dir = Dir(root, pose);
             try
@@ -101,7 +102,7 @@ internal static class DuoFrames
         var frame = new byte[width * height * 4];
         var mask = new byte[width * height * 4];
         byte[]? glass = IPhoneDuo.IsInner(pose) ? new byte[width * height * 4] : null;
-        bool half = pose == DuoPose.HalfOpen;
+        bool half = IPhoneDuo.IsHalf(pose), across = IPhoneDuo.IsUpright(pose); // tabletop and open portrait: fold across
         int creaseWidth = half ? HalfCreaseWidth : CreaseWidth;
 
         var screen = layout.Screen;
@@ -116,7 +117,7 @@ internal static class DuoFrames
         var body = shapes.Body.Box;
         var hinge = RectangleF.FromLTRB(body.Left - HingeOut, body.Top + HingeInset, body.Left + HingeIn, body.Bottom - HingeInset);
         float hingeRadius = HingeOut;
-        float centre = screen.Left + screen.Width / 2f;
+        float centre = across ? screen.Top + screen.Height / 2f : screen.Left + screen.Width / 2f;
 
         Parallel.For(0, height, y =>
         {
@@ -151,7 +152,7 @@ internal static class DuoFrames
                 if (bodyCover > 0)
                 {
                     var c = Titanium(Math.Clamp(-dBody / Rim, 0, 1), light);
-                    if (IPhoneDuo.IsInner(pose)) c = Seam(c, px - centre, -dBody);
+                    if (IPhoneDuo.IsInner(pose)) c = Seam(c, (across ? py : px) - centre, -dBody);
                     float gasket = Cover(RoundedBox(px, py, shapes.Gasket.Box, shapes.Gasket.L, shapes.Gasket.R));
                     float glassCover = Cover(RoundedBox(px, py, shapes.Glass.Box, shapes.Glass.L, shapes.Glass.R));
                     c = Mix(c, (0.075f, 0.075f, 0.082f), gasket);
@@ -165,7 +166,7 @@ internal static class DuoFrames
 
                 if (glass != null && screenCover > 0)
                 {
-                    var (cr, cg, cb, ca) = Crease((px - centre) / creaseWidth + 0.5f, half);
+                    var (cr, cg, cb, ca) = Crease(((across ? py : px) - centre) / creaseWidth + 0.5f, half);
                     Store(glass, p, cr * screenCover, cg * screenCover, cb * screenCover, ca * screenCover);
                 }
             }

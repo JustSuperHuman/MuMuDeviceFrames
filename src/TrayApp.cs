@@ -8,7 +8,14 @@ namespace MuMuDeviceFrames;
 internal sealed class TrayApp : ApplicationContext
 {
     private const int FramesHotkeyId = 1, ExpoReloadHotkeyId = 2, ExpoGearHotkeyId = 3, DuoHotkeyId = 4, DuoHalfHotkeyId = 5;
-    private static readonly int[] HotkeyIds = [FramesHotkeyId, ExpoReloadHotkeyId, ExpoGearHotkeyId, DuoHotkeyId, DuoHalfHotkeyId];
+    /// <summary>Ctrl+Alt+1 to 5 (by default): one iPhone Duo pose each, in <see cref="IPhoneDuo.Poses"/> order.</summary>
+    private const int DuoPoseHotkeyBase = 11;
+    private static readonly int[] HotkeyIds = [FramesHotkeyId, ExpoReloadHotkeyId, ExpoGearHotkeyId, DuoHotkeyId, DuoHalfHotkeyId,
+        .. Enumerable.Range(DuoPoseHotkeyBase, IPhoneDuo.Poses.Length)];
+
+    /// <summary>The hotkey shown next to a pose, e.g. Ctrl+Alt+3 for the book.</summary>
+    public string? PoseHotkey(DuoPose pose) =>
+        string.IsNullOrWhiteSpace(Config.DuoPoseHotkeys) ? null : $"{Config.DuoPoseHotkeys}+{Array.IndexOf(IPhoneDuo.Poses, pose) + 1}";
 
     private readonly NotifyIcon _tray;
     private readonly ContextMenuStrip _trayMenu = new();
@@ -27,13 +34,24 @@ internal sealed class TrayApp : ApplicationContext
     public AppConfig Config { get; }
     public FrameLibrary Library { get; private set; }
 
+    private readonly Dictionary<string, DateTime> _fitAttempts = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>True (and remembered) unless this emulator was fitted to this target in the last few minutes.</summary>
+    public bool TryFit(string emulator, string target)
+    {
+        string key = $"{emulator}|{target}";
+        if (_fitAttempts.TryGetValue(key, out var at) && DateTime.UtcNow - at < TimeSpan.FromMinutes(3)) return false;
+        _fitAttempts[key] = DateTime.UtcNow;
+        return true;
+    }
+
     public TrayApp()
     {
         _ui = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
         Config = AppConfig.Load();
         Library = FrameLibrary.Load(Config.FramesRoot);
 
-        _window = new HiddenWindow(OnHotkey, RunExpoAction, RecordFrameByName, SetDuoPoseByName, ExitThread);
+        _window = new HiddenWindow(OnHotkey, RunExpoAction, RecordFrameByName, SetDuoPoseByName, SetFrameByName, ExitThread);
         RegisterHotkeys();
 
         _trayMenu.Opening += (_, _) => BuildMenu(_trayMenu, null);
@@ -375,24 +393,25 @@ internal sealed class TrayApp : ApplicationContext
 
         if (session.IsDuoSurface || IPhoneDuo.IsDuo(session.Frame))
         {
-            // iPhone Duo: the two displays, and half open like a book. Each switch is live, no restart.
+            // iPhone Duo: the five poses. Each switch is live, no restart.
             bool canFold = connected && session.IsDuoSurface;
-            items.Add(new MenuItem("Fold (outer display)", null, () => session.SetDuoPose(DuoPose.Folded))
+            foreach (var pose in IPhoneDuo.Poses)
             {
-                Checked = session.Pose == DuoPose.Folded, Enabled = canFold,
-                Hint = session.Pose == DuoPose.Folded ? "466 × 678 pt" : Config.DuoHotkey,
-            });
-            items.Add(new MenuItem("Half open (book)", null, () => session.SetDuoPose(DuoPose.HalfOpen))
+                bool half = IPhoneDuo.IsHalf(pose);
+                items.Add(new MenuItem(pose switch { DuoPose.HalfOpen => "Book (half open)", DuoPose.Tabletop => "Tabletop (half open)", _ => IPhoneDuo.Variant(pose) },
+                    null, () => session.SetDuoPose(pose))
+                {
+                    // Only a foldable can tell apps it is half open; elsewhere it would just be open.
+                    Checked = session.Pose == pose, Enabled = canFold && (!half || session.IsFoldable),
+                    Hint = half && !session.IsFoldable ? "Needs Set up as iPhone Duo" : PoseHotkey(pose),
+                });
+            }
+            items.Add(Check("Show pose controls", Config.DuoPoseControls, () =>
             {
-                // Only a foldable can tell apps it is half open; elsewhere it would just be open.
-                Checked = session.Pose == DuoPose.HalfOpen, Enabled = canFold && session.IsFoldable,
-                Hint = !session.IsFoldable ? "Needs Set up as iPhone Duo" : session.Pose == DuoPose.HalfOpen ? "Fold reported to apps" : Config.DuoHalfHotkey,
-            });
-            items.Add(new MenuItem("Unfold (inner display)", null, () => session.SetDuoPose(DuoPose.Open))
-            {
-                Checked = session.Pose == DuoPose.Open, Enabled = canFold,
-                Hint = session.Pose == DuoPose.Open ? "890 × 626 pt" : session.Pose == DuoPose.Folded ? Config.DuoHotkey : Config.DuoHalfHotkey,
-            });
+                Config.DuoPoseControls = !Config.DuoPoseControls;
+                Config.Save();
+                SyncAll();
+            }));
         }
 
         if (ShareXIntegration.FindCompatible(Config.ShareXExecutable) != null)
@@ -433,6 +452,8 @@ internal sealed class TrayApp : ApplicationContext
 
     private void AddAndroidItems(ToolStripItemCollection items, EmulatorSession session, InstanceConfig instance, bool connected)
     {
+        items.Add(FitItem(session, instance));
+        items.Add(new MenuSeparator());
         if (IPhoneDuo.IsDuo(session.Frame))
         {
             AddDuoAndroidItems(items, session, connected);
@@ -458,7 +479,7 @@ internal sealed class TrayApp : ApplicationContext
         iosBar.Enabled = connected;
         items.Add(iosBar);
 
-        if (session is not { Display: { } display, Frame: { } frame }) return;
+        if (session is not { Display: { } display, Frame: { } frame } || instance.FitToFrame) return;
         items.Add(new MenuSeparator());
         var target = frame.Screen.Size;
         if (target == display.Native)
@@ -481,6 +502,25 @@ internal sealed class TrayApp : ApplicationContext
             Hint = cropped ? "Cropped now · restarts" : "Optional · restarts",
             HintTone = cropped ? HintTone.Caution : HintTone.Secondary,
         });
+    }
+
+    /// <summary>"Fit emulator to frame": the device's resolution and density for whatever frame is chosen.</summary>
+    private MenuItem FitItem(EmulatorSession session, InstanceConfig instance)
+    {
+        string? hint = null;
+        if (session.Frame is { } frame)
+        {
+            var spec = DeviceSpecs.For(frame);
+            bool fits = session.Display is { } display && (IPhoneDuo.IsDuo(frame) ? session.IsDuoSurface && session.IsFoldable : DeviceFit.Needed(spec, display) == DeviceFit.Step.None);
+            hint = IPhoneDuo.IsDuo(frame) ? (fits ? "iPhone Duo" : "Sets up iPhone Duo")
+                : $"{spec.Native.Width}×{spec.Native.Height} · {spec.Density} dpi{(fits ? "" : " · restarts")}";
+        }
+        return Check("Fit emulator to frame", instance.FitToFrame, () =>
+        {
+            instance.FitToFrame = !instance.FitToFrame;
+            Config.Save();
+            session.Sync();
+        }, hint: hint);
     }
 
     /// <summary>
@@ -565,6 +605,26 @@ internal sealed class TrayApp : ApplicationContext
         }
         RememberEmulator(target);
         return RecordFrame(target);
+    }
+
+    /// <summary>--set-frame: a frame (or null for automatic) for a named emulator, as if picked from its menu.</summary>
+    private bool SetFrameByName(string name, string? key)
+    {
+        var target = FindTarget(name);
+        if (key != null && Library.Find(key) == null)
+        {
+            Log.Write($"--set-frame: unknown frame '{key}'");
+            return false;
+        }
+        if (target == null)
+        {
+            Config.Instance(name).Frame = key; // used when that emulator starts
+            Config.Save();
+            return true;
+        }
+        Log.Write($"Frame for '{target.Title}' -> {key ?? "automatic"}");
+        SetInstanceFrame(target, key);
+        return true;
     }
 
     /// <summary>Half open like a book, or back to flat (the book hotkey).</summary>
@@ -788,13 +848,14 @@ internal sealed class TrayApp : ApplicationContext
         bool interactiveChanged = Config.BezelInteractive != fresh.BezelInteractive;
         Config.BezelInteractive = fresh.BezelInteractive;
         if (Config.Hotkey != fresh.Hotkey || Config.ExpoReloadHotkey != fresh.ExpoReloadHotkey || Config.ExpoGearHotkey != fresh.ExpoGearHotkey
-            || Config.DuoHotkey != fresh.DuoHotkey || Config.DuoHalfHotkey != fresh.DuoHalfHotkey)
+            || Config.DuoHotkey != fresh.DuoHotkey || Config.DuoHalfHotkey != fresh.DuoHalfHotkey || Config.DuoPoseHotkeys != fresh.DuoPoseHotkeys)
         {
             Config.Hotkey = fresh.Hotkey;
             Config.ExpoReloadHotkey = fresh.ExpoReloadHotkey;
             Config.ExpoGearHotkey = fresh.ExpoGearHotkey;
             Config.DuoHotkey = fresh.DuoHotkey;
             Config.DuoHalfHotkey = fresh.DuoHalfHotkey;
+            Config.DuoPoseHotkeys = fresh.DuoPoseHotkeys;
             RegisterHotkeys();
         }
 
@@ -822,6 +883,9 @@ internal sealed class TrayApp : ApplicationContext
             case ExpoGearHotkeyId: RunExpoAction(ExpoAction.ToggleGear); break;
             case DuoHotkeyId: SetDuoPoseByName(null, null); break;
             case DuoHalfHotkeyId: ToggleDuoHalf(); break;
+            case >= DuoPoseHotkeyBase when id < DuoPoseHotkeyBase + IPhoneDuo.Poses.Length:
+                SetDuoPoseByName(null, IPhoneDuo.Poses[id - DuoPoseHotkeyBase]);
+                break;
         }
     }
 
@@ -915,6 +979,8 @@ internal sealed class TrayApp : ApplicationContext
         RegisterHotkey(ExpoGearHotkeyId, Config.ExpoGearHotkey);
         RegisterHotkey(DuoHotkeyId, Config.DuoHotkey);
         RegisterHotkey(DuoHalfHotkeyId, Config.DuoHalfHotkey);
+        if (!string.IsNullOrWhiteSpace(Config.DuoPoseHotkeys))
+            for (int i = 0; i < IPhoneDuo.Poses.Length; i++) RegisterHotkey(DuoPoseHotkeyBase + i, $"{Config.DuoPoseHotkeys}+D{i + 1}");
     }
 
     private void RegisterHotkey(int id, string binding)
@@ -1022,12 +1088,11 @@ internal sealed class TrayApp : ApplicationContext
     public static bool RequestFrameRecordingOfRunningInstance(string? name) => SendToRunningInstance(HiddenWindow.RecordFrameData, name);
 
     /// <summary>Folds or unfolds the iPhone Duo in the named (or active) emulator of the running tray app.</summary>
-    public static bool RequestDuoPoseOfRunningInstance(DuoPose pose, string? name) => SendToRunningInstance(pose switch
-    {
-        DuoPose.Folded => HiddenWindow.DuoFoldData,
-        DuoPose.HalfOpen => HiddenWindow.DuoHalfData,
-        _ => HiddenWindow.DuoUnfoldData,
-    }, name);
+    public static bool RequestDuoPoseOfRunningInstance(DuoPose pose, string? name) => SendToRunningInstance(HiddenWindow.DuoPoseData + (int)pose, name);
+
+    /// <summary>Gives an emulator a frame through the running tray app (<c>--set-frame</c>).</summary>
+    public static bool RequestSetFrameOfRunningInstance(string name, string? key) =>
+        SendToRunningInstance(HiddenWindow.SetFrameData, name + "" + (key ?? ""));
 
     /// <summary>True when the tray app is running (so commands go through it and its frames follow).</summary>
     public static bool IsRunning => FindWindowW(null, HiddenWindow.WindowCaption) != IntPtr.Zero;
@@ -1035,7 +1100,7 @@ internal sealed class TrayApp : ApplicationContext
     private static bool SendToRunningInstance(int dataId, string? name)
     {
         IntPtr hwnd = FindWindowW(null, HiddenWindow.WindowCaption);
-        if (hwnd == IntPtr.Zero || name is { Length: > 200 }) return false;
+        if (hwnd == IntPtr.Zero || name is { Length: > 500 }) return false;
         IntPtr data = System.Runtime.InteropServices.Marshal.StringToHGlobalUni(name ?? "");
         IntPtr message = IntPtr.Zero;
         try
@@ -1059,17 +1124,19 @@ internal sealed class TrayApp : ApplicationContext
         public const int WM_EXIT_REQUEST = 0x8000 + 1; // WM_APP + 1, posted by "MuMuDeviceFrames.exe --exit"
         public const int WM_EXPO_RELOAD = 0x8000 + 2, WM_EXPO_GEAR = 0x8000 + 3;
         /// <summary>WM_COPYDATA kinds; the payload is an emulator name (empty for the active one).</summary>
-        public const int RecordFrameData = 1, DuoFoldData = 2, DuoUnfoldData = 3, DuoHalfData = 4;
+        public const int RecordFrameData = 1, SetFrameData = 2, DuoPoseData = 10; // DuoPoseData + (int)pose
 
         private readonly Action<int> _onHotkey;
         private readonly Func<ExpoAction, bool> _onExpoAction;
         private readonly Func<string?, bool> _onRecordFrame;
         private readonly Func<string?, DuoPose?, bool> _onDuoPose;
+        private readonly Func<string, string?, bool> _onSetFrame;
         private readonly Action _onExit;
 
         public HiddenWindow(Action<int> onHotkey, Func<ExpoAction, bool> onExpoAction, Func<string?, bool> onRecordFrame,
-            Func<string?, DuoPose?, bool> onDuoPose, Action onExit)
+            Func<string?, DuoPose?, bool> onDuoPose, Func<string, string?, bool> onSetFrame, Action onExit)
         {
+            _onSetFrame = onSetFrame;
             _onHotkey = onHotkey;
             _onExpoAction = onExpoAction;
             _onRecordFrame = onRecordFrame;
@@ -1087,12 +1154,19 @@ internal sealed class TrayApp : ApplicationContext
             if (m.Msg == WM_COPYDATA && m.LParam != IntPtr.Zero)
             {
                 var data = System.Runtime.InteropServices.Marshal.PtrToStructure<COPYDATASTRUCT>(m.LParam);
-                if (data.DataId is RecordFrameData or DuoFoldData or DuoUnfoldData or DuoHalfData && data.Data != IntPtr.Zero && data.ByteCount is >= 2 and <= 402 && data.ByteCount % 2 == 0)
+                bool pose = data.DataId >= DuoPoseData && data.DataId < DuoPoseData + IPhoneDuo.Poses.Length;
+                if ((data.DataId == RecordFrameData || data.DataId == SetFrameData || pose) && data.Data != IntPtr.Zero && data.ByteCount is >= 2 and <= 1002 && data.ByteCount % 2 == 0)
                 {
                     string? name = System.Runtime.InteropServices.Marshal.PtrToStringUni(data.Data, data.ByteCount / 2 - 1);
+                    if (data.DataId == SetFrameData)
+                    {
+                        var parts = name.Split('', 2);
+                        m.Result = parts.Length == 2 && _onSetFrame(parts[0], parts[1].Length == 0 ? null : parts[1]) ? (IntPtr)1 : IntPtr.Zero;
+                        return;
+                    }
                     if (string.IsNullOrWhiteSpace(name)) name = null;
                     bool ok = data.DataId == RecordFrameData ? _onRecordFrame(name)
-                        : _onDuoPose(name, data.DataId switch { DuoFoldData => DuoPose.Folded, DuoHalfData => DuoPose.HalfOpen, _ => DuoPose.Open });
+                        : _onDuoPose(name, (DuoPose)(int)(data.DataId - DuoPoseData));
                     m.Result = ok ? (IntPtr)1 : IntPtr.Zero;
                 }
                 return;

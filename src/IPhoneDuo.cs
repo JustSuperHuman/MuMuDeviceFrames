@@ -2,8 +2,11 @@ using System.Text.RegularExpressions;
 
 namespace MuMuDeviceFrames;
 
-/// <summary>How the iPhone Duo is held: closed (outer display), open flat or half open like a book (inner display).</summary>
-internal enum DuoPose { Folded, Open, HalfOpen }
+/// <summary>
+/// How the iPhone Duo is held. Closed uses the outer display; the other four the inner one: open flat or half open
+/// like a book (landscape, fold down the middle), and open flat or half open as a tabletop (portrait, fold across).
+/// </summary>
+internal enum DuoPose { Folded, Open, HalfOpen, OpenPortrait, Tabletop }
 
 /// <summary>
 /// What a Duo emulator's Android reports beyond <c>wm size</c>: the size apps see now (rotation included), and, once it
@@ -14,8 +17,8 @@ internal sealed record DuoDevice(Size? Current, bool Foldable, int? FoldState, b
 /// <summary>
 /// iPhone Duo on a MuMu emulator. The emulator runs at the bounding box of both displays (2670 × 2034 at 480 dpi) and
 /// Android's <c>wm size</c> switches between them live: the closed phone's 1398 × 2034 outer display or the open
-/// phone's 2670 × 1878 inner one. Each shares one side with the bounding box, so Android draws it at exactly 1:1,
-/// centred on MuMu's render surface with black bars around it.
+/// phone's 2670 × 1878 inner one, which can also be turned portrait (1878 × 2670, MuMu turns its window with it). Each
+/// shares one side with the surface, so Android draws it at exactly 1:1, centred, with black bars around it.
 ///
 /// Made a foldable (see <see cref="DuoSetup"/>), Android also has the device states CLOSED, HALF_OPENED and OPENED, a
 /// postures overlay that maps them to Jetpack WindowManager's postures, and a fold line in <c>display_features</c>,
@@ -26,51 +29,129 @@ internal static class IPhoneDuo
     public const string Category = "Apple iPhone", Model = "iPhone Duo";
     public const int Density = 480;
 
-    /// <summary>MuMu's render surface as seen in its window: both displays fit inside it (landscape).</summary>
+    /// <summary>MuMu's render surface as seen in its window, the usual (landscape) way round.</summary>
     public static readonly Size Surface = new(2670, 2034);
     /// <summary>Closed: the outer display, portrait, hinge on the left.</summary>
     public static readonly Size OuterScreen = new(1398, 2034);
-    /// <summary>Open or half open: the inner display, landscape.</summary>
+    /// <summary>Open, book: the inner display, landscape.</summary>
     public static readonly Size InnerScreen = new(2670, 1878);
+    /// <summary>Open portrait, tabletop: the inner display turned upright.</summary>
+    public static readonly Size InnerPortrait = new(1878, 2670);
+
+    public static readonly DuoPose[] Poses = [DuoPose.Folded, DuoPose.Open, DuoPose.HalfOpen, DuoPose.OpenPortrait, DuoPose.Tabletop];
 
     public static bool IsInner(DuoPose pose) => pose != DuoPose.Folded;
-    public static Size ScreenSize(DuoPose pose) => IsInner(pose) ? InnerScreen : OuterScreen;
-    public static string Variant(DuoPose pose) => pose switch { DuoPose.Folded => "Closed", DuoPose.HalfOpen => "Half open", _ => "Open" };
+    /// <summary>Open portrait and tabletop: the inner display upright, the fold across it.</summary>
+    public static bool IsUpright(DuoPose pose) => pose is DuoPose.OpenPortrait or DuoPose.Tabletop;
+    /// <summary>Book and tabletop: the halves at an angle (device state HALF_OPENED).</summary>
+    public static bool IsHalf(DuoPose pose) => pose is DuoPose.HalfOpen or DuoPose.Tabletop;
+
+    public static Size ScreenSize(DuoPose pose) => !IsInner(pose) ? OuterScreen : IsUpright(pose) ? InnerPortrait : InnerScreen;
+    /// <summary>The render surface as seen for a pose: MuMu turns its window upright for open portrait and tabletop.</summary>
+    public static Size SurfaceFor(DuoPose pose) => IsUpright(pose) ? new Size(Surface.Height, Surface.Width) : Surface;
+
+    /// <summary>Frame variant names, also what menus show.</summary>
+    public static string Variant(DuoPose pose) => pose switch
+    {
+        DuoPose.Folded => "Closed",
+        DuoPose.HalfOpen => "Book",
+        DuoPose.OpenPortrait => "Open portrait",
+        DuoPose.Tabletop => "Tabletop",
+        _ => "Open",
+    };
+
+    /// <summary>Command-line names (<c>--duo-pose book</c>).</summary>
+    public static string CliName(DuoPose pose) => pose switch
+    {
+        DuoPose.Folded => "closed",
+        DuoPose.HalfOpen => "book",
+        DuoPose.OpenPortrait => "portrait",
+        DuoPose.Tabletop => "tabletop",
+        _ => "open",
+    };
+
+    public static DuoPose? ParseCliName(string? name) => name?.Trim().ToLowerInvariant() switch
+    {
+        "closed" or "fold" or "folded" => DuoPose.Folded,
+        "open" or "unfold" or "flat" => DuoPose.Open,
+        "book" or "half" => DuoPose.HalfOpen,
+        "portrait" or "open-portrait" => DuoPose.OpenPortrait,
+        "tabletop" or "table" => DuoPose.Tabletop,
+        _ => null,
+    };
+
+    /// <summary>One line on the display and the fold, for tooltips and menus.</summary>
+    public static string Describe(DuoPose pose) => pose switch
+    {
+        DuoPose.Folded => "Closed: outer display, 466 × 678 pt",
+        DuoPose.Open => "Open: 890 × 626 pt, flat",
+        DuoPose.HalfOpen => "Book: 890 × 626 pt, half open, fold down the middle",
+        DuoPose.OpenPortrait => "Open portrait: 626 × 890 pt, flat",
+        _ => "Tabletop: 626 × 890 pt, half open, fold across the middle",
+    };
+
     public static string FrameKey(DuoPose pose) => $"{Category}/{Model}/{Variant(pose)}";
 
     /// <summary>Android device state for a pose, as defined in <see cref="DeviceStateConfig"/>.</summary>
-    public static int StateFor(DuoPose pose) => pose switch { DuoPose.Folded => 0, DuoPose.HalfOpen => 1, _ => 2 };
+    public static int StateFor(DuoPose pose) => pose == DuoPose.Folded ? 0 : IsHalf(pose) ? 1 : 2;
 
     /// <summary>Fold / unfold toggle: closed opens flat, anything open closes.</summary>
     public static DuoPose Toggle(DuoPose? pose) => pose == DuoPose.Folded ? DuoPose.Open : DuoPose.Folded;
-    /// <summary>Book toggle: half open goes flat, anything else goes to half open.</summary>
-    public static DuoPose ToggleHalf(DuoPose? pose) => pose == DuoPose.HalfOpen ? DuoPose.Open : DuoPose.HalfOpen;
+
+    /// <summary>Half-open toggle, keeping the way round: book and open swap, so do tabletop and open portrait.</summary>
+    public static DuoPose ToggleHalf(DuoPose? pose) => pose switch
+    {
+        DuoPose.HalfOpen => DuoPose.Open,
+        DuoPose.OpenPortrait => DuoPose.Tabletop,
+        DuoPose.Tabletop => DuoPose.OpenPortrait,
+        _ => DuoPose.HalfOpen,
+    };
 
     public static bool IsDuo(FrameInfo? frame) => frame != null &&
         string.Equals(frame.Category, Category, StringComparison.OrdinalIgnoreCase) && string.Equals(frame.Model, Model, StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>The pose a Duo frame variant shows ("Closed", "Open" or "Half open").</summary>
+    /// <summary>The pose a Duo frame variant shows.</summary>
     public static DuoPose? PoseOf(FrameInfo? frame) => !IsDuo(frame) ? null
-        : Enum.GetValues<DuoPose>().Cast<DuoPose?>().FirstOrDefault(p => string.Equals(frame!.Variant, Variant(p!.Value), StringComparison.OrdinalIgnoreCase)) ?? DuoPose.Folded;
+        : Poses.Cast<DuoPose?>().FirstOrDefault(p => string.Equals(frame!.Variant, Variant(p!.Value), StringComparison.OrdinalIgnoreCase)) ?? DuoPose.Folded;
 
-    /// <summary>The display (outer: Folded, inner: Open) that has this size, a screenshot say, in either orientation.</summary>
+    /// <summary>The display a screenshot of this size shows: outer (Folded), inner landscape (Open) or upright (OpenPortrait).</summary>
     public static DuoPose? PoseForScreen(Size size) =>
-        SameSize(size, OuterScreen) ? DuoPose.Folded : SameSize(size, InnerScreen) ? DuoPose.Open : null;
+        SameSize(size, OuterScreen) ? DuoPose.Folded : size == InnerScreen ? DuoPose.Open : size == InnerPortrait ? DuoPose.OpenPortrait : null;
+
+    /// <summary>
+    /// The pose to frame a screenshot in: the screenshot's size says which display and which way round, the pose shown
+    /// says whether the halves were flat or at an angle.
+    /// </summary>
+    public static DuoPose? ForShot(DuoPose? shown, Size shot)
+    {
+        bool half = shown is { } p && IsHalf(p);
+        return PoseForScreen(shot) switch
+        {
+            DuoPose.Folded => DuoPose.Folded,
+            DuoPose.Open => half ? DuoPose.HalfOpen : DuoPose.Open,
+            DuoPose.OpenPortrait => half ? DuoPose.Tabletop : DuoPose.OpenPortrait,
+            _ => null,
+        };
+    }
 
     /// <summary>True when Android's physical display is the Duo bounding box (MuMu reports it in either orientation).</summary>
     public static bool IsSurface(Size physical) => SameSize(physical, Surface);
 
     /// <summary>
-    /// The pose Android is in: the display from the <c>wm size</c> override, and for the inner display the device state
-    /// tells half open (1) from open. Null when the emulator is in no Duo pose.
+    /// The pose Android is in: the display from the <c>wm size</c> override, which way round from the size apps see
+    /// now, and flat or half open from the device state. Null when the emulator is in no Duo pose.
     /// </summary>
-    public static DuoPose? Detect(Size physical, Size? overrideSize, int? foldState = null)
+    public static DuoPose? Detect(Size physical, Size? overrideSize, int? foldState = null, Size? current = null)
     {
-        if (!IsSurface(physical) || overrideSize is not { } size || PoseForScreen(size) is not { } display) return null;
-        return display == DuoPose.Open && foldState == StateFor(DuoPose.HalfOpen) ? DuoPose.HalfOpen : display;
+        if (!IsSurface(physical) || overrideSize is not { } size || !SameSize(size, OuterScreen) && !SameSize(size, InnerScreen)) return null;
+        if (SameSize(size, OuterScreen)) return DuoPose.Folded;
+        bool upright = current is { } now && now.Width < now.Height;
+        bool half = foldState == StateFor(DuoPose.HalfOpen);
+        return upright ? half ? DuoPose.Tabletop : DuoPose.OpenPortrait : half ? DuoPose.HalfOpen : DuoPose.Open;
     }
 
-    public static DuoPose? Detect(AndroidDisplay? display) => display == null ? null : Detect(display.Native, display.Override, display.Duo?.FoldState);
+    public static DuoPose? Detect(AndroidDisplay? display) =>
+        display == null ? null : Detect(display.Native, display.Override, display.Duo?.FoldState, display.Duo?.Current);
 
     /// <summary>
     /// True when everything a pose sets still holds: apps see the pose's display the right way round (MuMu turns the
@@ -149,12 +230,14 @@ internal static class IPhoneDuo
     public static string[] Commands(DuoPose pose, Size physical, bool foldable = false)
     {
         bool turned = physical.Width < physical.Height;
-        var size = ScreenSize(pose);
-        var natural = turned ? new Size(size.Height, size.Width) : size;
+        // wm size is the display in the panel's own orientation, the same for both ways round of the inner display;
+        // the rotation turns it: on MuMu's turned panel 1 shows it landscape, 0 upright.
+        var landscape = IsInner(pose) ? InnerScreen : OuterScreen;
+        var natural = turned ? new Size(landscape.Height, landscape.Width) : landscape;
         string[] display =
         [
             "wm fixed-to-user-rotation enabled",
-            $"wm user-rotation lock {(turned ? 1 : 0)}",
+            $"wm user-rotation lock {(turned != IsUpright(pose) ? 1 : 0)}",
             $"wm size {natural.Width}x{natural.Height}",
             $"wm density {Density}",
         ];
@@ -196,8 +279,8 @@ internal static class IPhoneDuo
     /// </summary>
     public static Rectangle PictureOnSurface(DuoPose pose)
     {
-        var size = ScreenSize(pose);
-        return new Rectangle((Surface.Width - size.Width) / 2, (Surface.Height - size.Height) / 2, size.Width, size.Height);
+        Size size = ScreenSize(pose), surface = SurfaceFor(pose);
+        return new Rectangle((surface.Width - size.Width) / 2, (surface.Height - size.Height) / 2, size.Width, size.Height);
     }
 
     /// <summary>
@@ -206,9 +289,10 @@ internal static class IPhoneDuo
     /// </summary>
     public static Rectangle? PictureInRender(DuoPose pose, Size render)
     {
-        if (render.Width <= 0 || render.Height <= 0 || render.Width < render.Height) return null;
+        var surface = SurfaceFor(pose);
+        if (render.Width <= 0 || render.Height <= 0 || render.Width < render.Height != surface.Width < surface.Height) return null;
         var p = PictureOnSurface(pose);
-        double sx = (double)render.Width / Surface.Width, sy = (double)render.Height / Surface.Height;
+        double sx = (double)render.Width / surface.Width, sy = (double)render.Height / surface.Height;
         int x0 = (int)Math.Round(p.Left * sx), x1 = (int)Math.Round(p.Right * sx);
         int y0 = (int)Math.Round(p.Top * sy), y1 = (int)Math.Round(p.Bottom * sy);
         return Rectangle.FromLTRB(x0, y0, x1, y1);

@@ -82,9 +82,24 @@ internal static class Diagnostics
 
             using var window = PrintEmulator(main, wr);
 
+            // iPhone Duo: the pose buttons beside the device, as the tray app shows them.
+            (byte[] Pixels, Size Size)? panel = null;
+            int panelX = 0, panelY = 0;
+            if (IPhoneDuo.IsDuo(frame) && pose != null && config.DuoPoseControls)
+            {
+                uint dpi = GetDpiForWindow(main);
+                float scale = dpi == 0 ? 1f : dpi / 96f;
+                var display = MuMuControl.LocateByName(title) is { } at ? MuMuControl.QueryDisplay(at) : null;
+                panel = DuoPosePanel.Preview(IPhoneDuo.Detect(display) ?? pose, display?.Duo?.Foldable == true, scale, -1, p => $"Ctrl+Alt+{Array.IndexOf(IPhoneDuo.Poses, p) + 1}");
+                double sx = (double)picture.Width / frame.Screen.Width;
+                panelX = rendered.RenderOffset.X + picture.Width + (int)Math.Round(DuoFrames.Border * sx) + (int)Math.Round(DuoPosePanel.LogicalOffset * scale);
+                panelY = rendered.RenderOffset.Y + picture.Height / 2 - (int)Math.Round(DuoPosePanel.LogicalHeight * scale) / 2;
+            }
+
             // Premultiplied BGRA canvas. "transparent" keeps the alpha, "checker" is the default, otherwise a hex colour.
             const int margin = 24;
-            int width = rendered.Width + 2 * margin, height = rendered.Height + 2 * margin;
+            int width = Math.Max(rendered.Width, panel is { } pp ? panelX + (int)Math.Round(DuoPosePanel.PillWidthLogical * (pp.Size.Height / DuoPosePanel.LogicalHeight)) : 0) + 2 * margin,
+                height = rendered.Height + 2 * margin;
             var canvas = new byte[width * height * 4];
             bool transparent = string.Equals(background, "transparent", StringComparison.OrdinalIgnoreCase);
             Color? solid = background is { Length: 7 } && background[0] == '#' ? ColorTranslator.FromHtml(background) : null;
@@ -144,6 +159,22 @@ internal static class Diagnostics
                     int p = ((y + margin) * width + x + margin) * 4;
                     for (int c = 0; c < 4; c++)
                         canvas[p + c] = (byte)(rendered.Pixels[s + c] + canvas[p + c] * (255 - a) / 255);
+                }
+            }
+
+            if (panel is { } drawn)
+            {
+                for (int y = 0; y < drawn.Size.Height; y++)
+                {
+                    for (int x = 0; x < drawn.Size.Width; x++)
+                    {
+                        int cx = margin + panelX + x, cy = margin + panelY + y;
+                        if (cx < 0 || cy < 0 || cx >= width || cy >= height) continue;
+                        int s = (y * drawn.Size.Width + x) * 4, a = drawn.Pixels[s + 3];
+                        if (a == 0) continue;
+                        int p = (cy * width + cx) * 4;
+                        for (int c = 0; c < 4; c++) canvas[p + c] = (byte)(drawn.Pixels[s + c] + canvas[p + c] * (255 - a) / 255);
+                    }
                 }
             }
 

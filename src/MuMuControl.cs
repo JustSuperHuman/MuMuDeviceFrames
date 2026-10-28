@@ -82,7 +82,8 @@ internal sealed record MuMuInstance(string Index, string ManagerPath, string Adb
 
 /// <param name="Override">The <c>wm size</c> override, when one is set (the iPhone Duo poses use it).</param>
 /// <param name="Duo">Rotation, device state and postures overlay, asked only on the iPhone Duo's surface.</param>
-internal sealed record AndroidDisplay(Size Native, int Density, Size? Override = null, DuoDevice? Duo = null);
+/// <param name="DensityOverride">The <c>wm density</c> override, when one is set.</param>
+internal sealed record AndroidDisplay(Size Native, int Density, Size? Override = null, DuoDevice? Duo = null, int? DensityOverride = null);
 
 internal static class MuMuControl
 {
@@ -181,11 +182,14 @@ internal static class MuMuControl
     {
         string wmSize = instance.Shell("wm size").Output;
         var size = Regex.Match(wmSize, @"Physical size:\s*(\d+)x(\d+)");
-        var density = Regex.Match(instance.Shell("wm density").Output, @"Physical density:\s*(\d+)");
+        string wmDensity = instance.Shell("wm density").Output;
+        var density = Regex.Match(wmDensity, @"Physical density:\s*(\d+)");
+        var densityOverride = Regex.Match(wmDensity, @"Override density:\s*(\d+)");
         if (!size.Success || !density.Success) return null;
         var physical = new Size(int.Parse(size.Groups[1].Value), int.Parse(size.Groups[2].Value));
         var duo = IPhoneDuo.IsSurface(physical) ? IPhoneDuo.ParseDevice(instance.Shell(IPhoneDuo.DeviceQuery).Output) : null;
-        return new AndroidDisplay(physical, int.Parse(density.Groups[1].Value), IPhoneDuo.ParseSize(wmSize, "Override size"), duo);
+        return new AndroidDisplay(physical, int.Parse(density.Groups[1].Value), IPhoneDuo.ParseSize(wmSize, "Override size"), duo,
+            densityOverride.Success ? int.Parse(densityOverride.Groups[1].Value) : null);
     }
 
     /// <summary>Writes a custom resolution into the instance's MuMu settings. Takes effect on the next emulator start.</summary>

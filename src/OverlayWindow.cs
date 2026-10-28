@@ -38,10 +38,27 @@ internal sealed class OverlayWindow : NativeWindow
     /// <summary>Other owned windows (the status-bar band, the glass layer) that move together with this one while dragging.</summary>
     public OverlayWindow?[] Companions { get; set; } = [];
 
-    public void SetFrame(RenderedFrame frame, Point position) => SetBitmap(frame.Pixels, frame.Width, frame.Height, position);
+    public void SetFrame(RenderedFrame frame, Point position, byte opacity = 255) => SetBitmap(frame.Pixels, frame.Width, frame.Height, position, opacity);
+
+    /// <summary>
+    /// Mouse messages (WM_MOUSEMOVE, WM_LBUTTONDOWN/UP, WM_MOUSELEAVE) with the point in window coordinates, for windows
+    /// that are controls rather than a bezel. Returning true means handled: no dragging, no menu.
+    /// </summary>
+    public Func<int, Point, bool>? Mouse { get; set; }
+
+    public byte Opacity { get; private set; } = 255;
+
+    /// <summary>Window-wide opacity, keeping the bitmap: what a cross-fade animates.</summary>
+    public void SetOpacity(byte opacity)
+    {
+        if (!IsAlive || opacity == Opacity) return;
+        Opacity = opacity;
+        var blend = new BLENDFUNCTION { BlendOp = 0, SourceConstantAlpha = opacity, AlphaFormat = 1 };
+        UpdateLayeredWindowAlpha(Handle, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, 0, ref blend, ULW_ALPHA);
+    }
 
     /// <summary>Shows a premultiplied BGRA bitmap at the given screen position.</summary>
-    public void SetBitmap(byte[] premultiplied, int width, int height, Point position)
+    public void SetBitmap(byte[] premultiplied, int width, int height, Point position, byte opacity = 255)
     {
         if (!IsAlive) return;
         IntPtr screenDc = GetDC(IntPtr.Zero);
@@ -56,7 +73,8 @@ internal sealed class OverlayWindow : NativeWindow
             var dst = new POINT { X = position.X, Y = position.Y };
             var size = new SIZE { Cx = width, Cy = height };
             var src = new POINT();
-            var blend = new BLENDFUNCTION { BlendOp = 0, SourceConstantAlpha = 255, AlphaFormat = 1 };
+            var blend = new BLENDFUNCTION { BlendOp = 0, SourceConstantAlpha = opacity, AlphaFormat = 1 };
+            Opacity = opacity;
             if (!UpdateLayeredWindow(Handle, screenDc, ref dst, ref size, memDc, ref src, 0, ref blend, ULW_ALPHA))
                 Log.Write($"UpdateLayeredWindow failed: {System.Runtime.InteropServices.Marshal.GetLastWin32Error()}");
             SelectObject(memDc, old);
@@ -88,6 +106,17 @@ internal sealed class OverlayWindow : NativeWindow
 
     protected override void WndProc(ref Message m)
     {
+        if (Mouse != null && m.Msg is WM_MOUSEMOVE or WM_LBUTTONDOWN or WM_LBUTTONUP or WM_MOUSELEAVE or WM_LBUTTONDBLCLK)
+        {
+            if (m.Msg == WM_MOUSEMOVE)
+            {
+                var track = new TRACKMOUSEEVENT { Size = System.Runtime.InteropServices.Marshal.SizeOf<TRACKMOUSEEVENT>(), Flags = TME_LEAVE, Window = Handle };
+                TrackMouseEvent(ref track);
+            }
+            long l = m.LParam.ToInt64();
+            var point = new Point((short)(l & 0xFFFF), (short)((l >> 16) & 0xFFFF));
+            if (Mouse(m.Msg, point)) return;
+        }
         switch (m.Msg)
         {
             case WM_MOUSEACTIVATE:

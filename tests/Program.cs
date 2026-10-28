@@ -50,7 +50,8 @@ finally
 
 // iPhone Duo: pose detection, picture placement and frames (pure logic, no emulator).
 Type duoPose = assembly.GetType("MuMuDeviceFrames.DuoPose")!;
-object Folded = Enum.Parse(duoPose, "Folded"), Open = Enum.Parse(duoPose, "Open"), HalfOpen = Enum.Parse(duoPose, "HalfOpen");
+object Folded = Enum.Parse(duoPose, "Folded"), Open = Enum.Parse(duoPose, "Open"), HalfOpen = Enum.Parse(duoPose, "HalfOpen"),
+    OpenPortrait = Enum.Parse(duoPose, "OpenPortrait"), Tabletop = Enum.Parse(duoPose, "Tabletop");
 object? CallTyped(string type, string method, Type[] types, params object?[] args) =>
     assembly.GetType($"MuMuDeviceFrames.{type}")!.GetMethod(method, BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic, types)!.Invoke(null, args);
 var mumuPanel = new System.Drawing.Size(2034, 2670); // MuMu's 2670 x 2034 surface, reported as a turned portrait panel
@@ -107,9 +108,9 @@ string frames = Path.Combine(Path.GetTempPath(), "deviceframes-duo-" + Guid.NewG
 try
 {
     var drawn = (System.Collections.IList)Call("DuoFrames", "Ensure", frames)!;
-    Check(drawn.Count == 3, "All three Duo frames drawn");
+    Check(drawn.Count == 5, "All five Duo frames drawn");
     var creaseStrength = new Dictionary<object, int>();
-    foreach (var pose in new[] { Folded, Open, HalfOpen })
+    foreach (var pose in new[] { Folded, Open, HalfOpen, OpenPortrait, Tabletop })
     {
         var info = Call("DuoFrames", "Frame", frames, pose)!;
         var source = Call("FrameSource", "Load", info)!;
@@ -144,12 +145,12 @@ finally
 }
 
 // Foldable: the device state tells half open from open on the inner display; the outer display is always closed.
-var detectTypes = new[] { typeof(System.Drawing.Size), typeof(System.Drawing.Size?), typeof(int?) };
+var detectTypes = new[] { typeof(System.Drawing.Size), typeof(System.Drawing.Size?), typeof(int?), typeof(System.Drawing.Size?) };
 var inner = new System.Drawing.Size(1878, 2670);
-Check(Equals(CallTyped("IPhoneDuo", "Detect", detectTypes, mumuPanel, inner, 1), HalfOpen), "Inner display in device state HALF_OPENED is half open");
-Check(Equals(CallTyped("IPhoneDuo", "Detect", detectTypes, mumuPanel, inner, 2), Open), "Inner display in device state OPENED is open");
-Check(Equals(CallTyped("IPhoneDuo", "Detect", detectTypes, mumuPanel, inner, null), Open), "Inner display without device states is open");
-Check(Equals(CallTyped("IPhoneDuo", "Detect", detectTypes, mumuPanel, new System.Drawing.Size(2034, 1398), 1), Folded),
+Check(Equals(CallTyped("IPhoneDuo", "Detect", detectTypes, mumuPanel, inner, 1, null), HalfOpen), "Inner display in device state HALF_OPENED is half open");
+Check(Equals(CallTyped("IPhoneDuo", "Detect", detectTypes, mumuPanel, inner, 2, null), Open), "Inner display in device state OPENED is open");
+Check(Equals(CallTyped("IPhoneDuo", "Detect", detectTypes, mumuPanel, inner, null, null), Open), "Inner display without device states is open");
+Check(Equals(CallTyped("IPhoneDuo", "Detect", detectTypes, mumuPanel, new System.Drawing.Size(2034, 1398), 1, null), Folded),
     "Outer display is closed whatever the device state says");
 
 // The one-line device query, as JG-Duo answered it, and as a phone without device states would.
@@ -163,7 +164,7 @@ Check(!Prop<bool>(plain, "Foldable") && Prop<int?>(plain, "FoldState") == null &
 
 // Drift: after an Android restart MuMu turns the display back and the state override is gone; both must be noticed.
 object Display(System.Drawing.Size current, bool foldable, int? state) => Activator.CreateInstance(assembly.GetType("MuMuDeviceFrames.AndroidDisplay")!,
-    mumuPanel, 480, (System.Drawing.Size?)inner, Activator.CreateInstance(duoDevice, (System.Drawing.Size?)current, foldable, state, true))!;
+    mumuPanel, 480, (System.Drawing.Size?)inner, Activator.CreateInstance(duoDevice, (System.Drawing.Size?)current, foldable, state, true), null)!;
 var inStepTypes = new[] { duoPose, assembly.GetType("MuMuDeviceFrames.AndroidDisplay")! };
 Check((bool)CallTyped("IPhoneDuo", "InStep", inStepTypes, HalfOpen, Display(new(2670, 1878), true, 1))!, "Half open in step");
 Check(!(bool)CallTyped("IPhoneDuo", "InStep", inStepTypes, HalfOpen, Display(new(2670, 1878), true, 0))!, "Half open whose device state was reset is out of step");
@@ -188,3 +189,5 @@ Check((string)Call("IPhoneDuo", "FoldFeature", new System.Drawing.Size(2670, 203
 // The hotkeys: Ctrl+Alt+D closes anything open and opens a closed phone; Ctrl+Alt+B goes to half open and back to flat.
 Check(Equals(Call("IPhoneDuo", "Toggle", HalfOpen), Folded) && Equals(Call("IPhoneDuo", "Toggle", Folded), Open), "Fold hotkey: half open closes, closed opens");
 Check(Equals(Call("IPhoneDuo", "ToggleHalf", Open), HalfOpen) && Equals(Call("IPhoneDuo", "ToggleHalf", HalfOpen), Open), "Book hotkey: open half opens, half open flattens");
+Check(Equals(Call("IPhoneDuo", "ToggleHalf", OpenPortrait), Tabletop) && Equals(Call("IPhoneDuo", "ToggleHalf", Tabletop), OpenPortrait),
+    "Book hotkey keeps the way round: open portrait and tabletop swap");

@@ -34,6 +34,14 @@ internal static class Program
         //   --duo-fold / --duo-unfold / --duo-half [name]
         //                                      iPhone Duo closed, open flat or half open (book), through the running tray
         //                                      app so the frame follows (active or named emulator); without it, adb directly
+        //   --duo-pose <closed|open|book|portrait|tabletop> [name]   any of the five poses
+        if (args.Length is 2 or 3 && args[0] == "--duo-pose")
+        {
+            if (IPhoneDuo.ParseCliName(args[1]) is not { } chosen) { Log.Write($"--duo-pose: unknown pose '{args[1]}'"); return 2; }
+            string? who = args.Length == 3 ? args[2] : null;
+            if (TrayApp.IsRunning) return TrayApp.RequestDuoPoseOfRunningInstance(chosen, who) ? 0 : 1;
+            return who == null ? 1 : RunDuoCommand(who, chosen);
+        }
         if (args.Length is 1 or 2 && args[0] is "--duo-fold" or "--duo-unfold" or "--duo-half")
         {
             var pose = args[0] switch { "--duo-fold" => DuoPose.Folded, "--duo-half" => DuoPose.HalfOpen, _ => DuoPose.Open };
@@ -51,10 +59,22 @@ internal static class Program
             if (error != null) Log.Write($"'{args[1]}': Duo setup failed: {error}");
             return error == null ? 0 : 1;
         }
+        //   --set-frame <name> <frame|auto>     choose an emulator's frame ("Category/Model/Variant"); with fit on, the
+        //                                      emulator becomes that device
+        if (args.Length == 3 && args[0] == "--set-frame")
+        {
+            string? key = string.Equals(args[2], "auto", StringComparison.OrdinalIgnoreCase) ? null : args[2];
+            if (TrayApp.IsRunning) return TrayApp.RequestSetFrameOfRunningInstance(args[1], key) ? 0 : 1;
+            var config = AppConfig.Load();
+            if (key != null && FrameLibrary.Load(config.FramesRoot).Find(key) == null) return 2;
+            config.Instance(args[1]).Frame = key;
+            config.Save();
+            return 0;
+        }
         //   --duo-frames <folder>              draw the iPhone Duo frames into a folder (they are built in otherwise)
         if (args.Length == 2 && args[0] == "--duo-frames")
         {
-            foreach (var pose in Enum.GetValues<DuoPose>()) DuoFrames.Write(pose, DuoFrames.Dir(Path.GetFullPath(args[1]), pose));
+            foreach (var pose in IPhoneDuo.Poses) DuoFrames.Write(pose, DuoFrames.Dir(Path.GetFullPath(args[1]), pose));
             return 0;
         }
         //   --record-frame [name]             record the whole visible frame with ShareX (active/last or named emulator)
