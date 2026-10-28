@@ -313,3 +313,27 @@ Check(turnedPairs.All(p => Equals(Call("IPhoneDuo", "Turned", p.Item1), p.Item2)
 var insetsOf = areas.GetType().GetMethod("Insets")!;
 Check(Equals(insetsOf.Invoke(areas, [Open]), (0, 0, 252, 102)) && Equals(insetsOf.Invoke(areas, [Tent]), (0, 0, 252, 102)) && Equals(insetsOf.Invoke(areas, [OpenPortrait]), (0, 0, 0, 102)),
     "Safe areas the watchdog expects: the rail and home indicator, upright only the home indicator (its top is the status bar)");
+
+// Each pose's last picture stands in for the live one at the next switch into that pose. It must never come back for
+// another size (the window was resized: it would not fit the frame), and a newer picture must replace an older one.
+var shotsType = assembly.GetType("MuMuDeviceFrames.PoseShots")!;
+var textureType = assembly.GetType("MuMuDeviceFrames.Texture")!;
+var renderKeyType = assembly.GetType("MuMuDeviceFrames.RenderKey")!;
+object Texture(byte fill) => Activator.CreateInstance(textureType, Enumerable.Repeat(fill, 16).ToArray(), 2, 2)!;
+object Key(string frame, int w, int h) => Activator.CreateInstance(renderKeyType, frame, w, h, 1)!;
+var shots = Activator.CreateInstance(shotsType)!;
+object? ShotOf(object pose, object key) => shotsType.GetMethod("Get")!.Invoke(shots, [pose, key]);
+void KeepShot(object pose, object key, object image) => shotsType.GetMethod("Put")!.Invoke(shots, [pose, key, image]);
+var openKey = Key("Apple iPhone/iPhone Duo/Open", 1009, 711);
+Check(ShotOf(Open, openKey) == null, "Pose pictures: none before the first switch (the dark screen, as before)");
+var first = Texture(10);
+KeepShot(Open, openKey, first);
+Check(ReferenceEquals(ShotOf(Open, openKey), first), "Pose pictures: the last picture of Open comes back for Open at the same size");
+Check(ShotOf(Open, Key("Apple iPhone/iPhone Duo/Open", 1260, 888)) == null, "Pose pictures: not after the window was resized");
+Check(ShotOf(Tent, openKey) == null && ShotOf(OpenPortrait, Key("Apple iPhone/iPhone Duo/Open portrait", 711, 1009)) == null,
+    "Pose pictures: one pose's picture never stands in for another");
+var newer = Texture(20);
+KeepShot(Open, openKey, newer);
+Check(ReferenceEquals(ShotOf(Open, openKey), newer), "Pose pictures: a newer picture replaces the older one");
+shotsType.GetMethod("Clear")!.Invoke(shots, []);
+Check(ShotOf(Open, openKey) == null, "Pose pictures: cleared, nothing comes back");

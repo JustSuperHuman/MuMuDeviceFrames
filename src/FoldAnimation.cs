@@ -6,6 +6,22 @@ using static MuMuDeviceFrames.Native;
 namespace MuMuDeviceFrames;
 
 /// <summary>A premultiplied BGRA image (top-down), what the animation maps onto the moving panels.</summary>
+/// <summary>
+/// The last picture of each pose of one emulator (its frame with the screen as it was), kept in memory so the next
+/// switch into that pose shows the app as it was last seen there while the live picture is on its way. A picture is
+/// only handed back for the same frame at the same size (the window was not resized since), and a newer one replaces it.
+/// </summary>
+internal sealed class PoseShots
+{
+    private readonly Dictionary<DuoPose, (RenderKey Key, Texture Image)> _shots = [];
+
+    public void Put(DuoPose pose, RenderKey key, Texture image) => _shots[pose] = (key, image);
+
+    public Texture? Get(DuoPose pose, RenderKey key) => _shots.TryGetValue(pose, out var shot) && shot.Key == key ? shot.Image : null;
+
+    public void Clear() => _shots.Clear();
+}
+
 internal sealed class Texture(byte[] pixels, int width, int height)
 {
     public byte[] Pixels { get; } = pixels;
@@ -48,6 +64,8 @@ internal sealed class FoldAnimation : IDisposable
     private readonly Shape _fromShape, _toShape;
     private readonly End _before;
     private End _after;              // placeholder (frame, dark screen) until the session has the real picture
+    private readonly Texture? _provisional; // the pose's last picture, shown until the real one replaces it
+    private Texture? _blend;          // the provisional picture cross-fading into the real one
     private bool _afterReal;
     private double _afterArrived;    // animation time the real picture arrived (it fades in)
     private RectangleF _target;      // smoothed towards the latest known after position
@@ -74,8 +92,13 @@ internal sealed class FoldAnimation : IDisposable
     /// <summary>Raised on the animation thread once the first frame is on screen.</summary>
     public event Action? Shown;
 
-    public FoldAnimation(IntPtr owner, DuoPose from, DuoPose to, End before, End afterPlaceholder, float hingeWidth, string? dumpFolder)
+    /// <param name="provisional">The new pose's last picture (<see cref="PoseShots"/>), the same size as the
+    /// placeholder: shown in its place until the real picture arrives, then cross-faded into it. Null: a dark screen
+    /// that wakes when the real picture arrives.</param>
+    public FoldAnimation(IntPtr owner, DuoPose from, DuoPose to, End before, End afterPlaceholder, float hingeWidth, string? dumpFolder,
+        Texture? provisional = null)
     {
+        _provisional = provisional is { } p && p.Width == afterPlaceholder.Image.Width && p.Height == afterPlaceholder.Image.Height ? p : null;
         _owner = owner;
         _from = from;
         _to = to;
@@ -274,10 +297,17 @@ internal sealed class FoldAnimation : IDisposable
             target = _target;
             arrived = _afterArrived;
         }
-        // Glide to the latest target (MuMu may move its window when it turns it).
-        after = new End(after.Image, target);
-        // The new picture fades in over the placeholder (an inner screen waking up), not a pop.
+        // The new picture fades in over the placeholder (an inner screen waking up), not a pop. With the pose's last
+        // picture standing in, the screen is lit from the start and that picture cross-fades into the real one.
         float wake = _afterReal ? (float)Math.Clamp((time - arrived) / 0.18, 0, 1) : 0;
+        var afterImage = after.Image;
+        if (_provisional is { } provisional)
+        {
+            afterImage = !_afterReal ? provisional : wake >= 1 ? after.Image : Blend(provisional, after.Image, wake);
+            wake = 1;
+        }
+        // Glide to the latest target (MuMu may move its window when it turns it).
+        after = new End(afterImage, target);
 
         surface.Clear();
         var origin = new PointF(_bounds.X, _bounds.Y);
@@ -322,6 +352,18 @@ internal sealed class FoldAnimation : IDisposable
             var finalUpright = _toShape == Shape.Upright ? after.Screen : _fromShape == Shape.Upright ? before.Screen : rect;
             DrawInner(surface, origin, fromImage, toImage, mix, rect, finalUpright, turn, tilt, screenWake);
         }
+    }
+
+    /// <summary><paramref name="a"/> cross-faded into <paramref name="b"/> by <paramref name="k"/>, into a buffer reused frame to frame.</summary>
+    private Texture Blend(Texture a, Texture b, float k)
+    {
+        if (a.Width != b.Width || a.Height != b.Height) return b;
+        if (_blend is not { } buffer || buffer.Width != b.Width || buffer.Height != b.Height) _blend = buffer = new Texture(new byte[b.Pixels.Length], b.Width, b.Height);
+        int w = (int)Math.Round(k * 256);
+        byte[] pa = a.Pixels, pb = b.Pixels, po = buffer.Pixels;
+        for (int i = 0; i < po.Length; i++) po[i] = (byte)((pa[i] * (256 - w) + pb[i] * w) >> 8);
+        // A new texture object each frame, so the rotation cache does not hand back last frame's blend.
+        return new Texture(po, buffer.Width, buffer.Height);
     }
 
     private Texture? _rotatedBefore, _rotatedAfter;

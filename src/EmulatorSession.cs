@@ -28,6 +28,7 @@ internal sealed class EmulatorSession : IDisposable
     private DateTime _afterNotBefore;
     private DateTime? _afterShownAt;
     private bool _hiddenUnderAnimation; // clipped to a dot while the animation stands in for it
+    private readonly PoseShots _shots = new(); // each pose's last picture, the stand-in for the next switch into it
     private System.Windows.Forms.Timer? _afterTimer;
     private bool _warmed;
     private RenderedFrame? _current;
@@ -580,6 +581,9 @@ internal sealed class EmulatorSession : IDisposable
                 afterScreen = new RectangleF(landing.X, landing.Y, landing.Width, landing.Height);
             }
             var placeholder = Composite(rendered, wr, null)!;
+            // This pose as it is now is the newest picture of it; the new pose's last one stands in until its live one.
+            _shots.Put(from, _shown.Key, before);
+            var provisional = _shots.Get(to, rendered.Key);
 
             // The closed phone's hinge line in its composite: the frame's left padding and hinge barrel, at this scale.
             var closedFrame = IPhoneDuo.IsInner(from) ? frame : Frame!;
@@ -587,7 +591,8 @@ internal sealed class EmulatorSession : IDisposable
             float hinge = (closedFrame.Screen.X - DuoFrames.Border) * (float)closedPicture / closedFrame.Screen.Width;
 
             string? dump = _app.Config.DuoAnimationDump is { Length: > 0 } folder ? Path.Combine(folder, $"{DateTime.Now:HHmmss}-{from}-{to}") : null;
-            var animation = new FoldAnimation(Main, from, to, new FoldAnimation.End(before, beforeScreen), new FoldAnimation.End(placeholder, afterScreen), hinge, dump);
+            var animation = new FoldAnimation(Main, from, to, new FoldAnimation.End(before, beforeScreen), new FoldAnimation.End(placeholder, afterScreen), hinge, dump,
+                provisional);
             animation.Landed += () => _app.Post(() => OnAnimationLanded(animation));
             // The live device goes once the animation is over it: hiding it first left a frame or two with neither.
             animation.Shown += () => _app.Post(() =>
@@ -600,7 +605,7 @@ internal sealed class EmulatorSession : IDisposable
             _afterNotBefore = DateTime.MaxValue;
             _afterShownAt = null;
             animation.Start();
-            Log.Write($"'{Title}': animating {from} -> {to}{(dump != null ? $" (frames to {dump})" : "")}");
+            Log.Write($"'{Title}': animating {from} -> {to}{(provisional != null ? $" ({to} as last seen until it is live)" : "")}{(dump != null ? $" (frames to {dump})" : "")}");
             return true;
         }
         catch (Exception ex)
@@ -721,6 +726,7 @@ internal sealed class EmulatorSession : IDisposable
         {
             _afterCaptured = true;
             _animation.SetAfter(after, screen);
+            if (!blank && _animationTarget is { } landed) _shots.Put(landed, _current.Key, after);
         }
     }
 
