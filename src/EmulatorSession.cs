@@ -18,6 +18,12 @@ internal sealed class EmulatorSession : IDisposable
     private DateTime _fadeStart;
     private bool _fadeNext;
     private Rectangle _pictureOnScreen;
+    private FoldAnimation? _animation;  // the fold animation covering a pose switch
+    private DuoPose? _animationTarget;
+    private bool _afterCaptured;
+    private DateTime _afterNotBefore;
+    private System.Windows.Forms.Timer? _afterTimer;
+    private bool _warmed;
     private RenderedFrame? _current;
     private RenderedFrame? _shown, _glassShown; // what the overlay and glass windows currently hold
     private RenderKey? _pending;
@@ -35,6 +41,19 @@ internal sealed class EmulatorSession : IDisposable
     private DateTime _nextResync;
     private bool _displayAnswered; // the first display query came back (with or without an answer)
     private bool _renderPortrait;
+    private int _clipFailures;
+    private Size _fittedRender, _letterboxSize;
+    private DateTime? _letterboxSince;
+    private DateTime _nextWindowFit;
+    // MuMu turns and resizes its window in steps over a few frames; the layout waits until both rects hold still.
+    private Size _seenWindowSize, _seenRenderSize;
+    private DateTime _sizeChangedAt;
+    private DateTime? _turnSince;           // the Duo picture is not the pose's way round yet (MuMu still turning)
+    private (RECT Window, RECT Render)? _laidOut; // what the frame on screen was laid out for (see Watch)
+    private static readonly TimeSpan SettleTime = TimeSpan.FromMilliseconds(120);
+    private static readonly TimeSpan TurnGrace = TimeSpan.FromSeconds(2);
+    private System.Windows.Forms.Timer? _placeTimer; // MuMu's picture placed again after region changes (see PlacePictureSoon)
+    private int _placeStep;
 
     /// <summary>adb endpoint and native display, known a moment after attaching (null until then).</summary>
     public MuMuInstance? Instance { get; private set; }
@@ -117,7 +136,22 @@ internal sealed class EmulatorSession : IDisposable
             return;
         }
 
-        RenderSize = new Size(rr.Width, rr.Height);
+        if (FitMuMuWindow(wr, rr)) return; // MuMu's window is being resized to its picture; Sync runs again on the move
+
+        // MuMu turns and resizes its window over several frames (a pose switch, its own rotation, a new resolution), and
+        // its last size event can come before it is done. Lay out once both rects have held their size for a moment,
+        // never on a size on the way, and keep looking (the burst) until then.
+        var now = DateTime.UtcNow;
+        var windowSize = new Size(wr.Width, wr.Height);
+        var renderSize = new Size(rr.Width, rr.Height);
+        if (windowSize != _seenWindowSize || renderSize != _seenRenderSize)
+        {
+            (_seenWindowSize, _seenRenderSize) = (windowSize, renderSize);
+            _sizeChangedAt = now;
+            StartVerifyBurst(10);
+        }
+        bool settling = now - _sizeChangedAt < SettleTime;
+        RenderSize = renderSize;
         // MuMu turns its window when it turns Android for an app it remembers in portrait; on a Duo that breaks the
         // pose, so check it now rather than at the next poll.
         bool portrait = rr.Width < rr.Height;
@@ -155,10 +189,32 @@ internal sealed class EmulatorSession : IDisposable
                 Suspend(); // a pose is on its way (see EnsureAndroid)
                 return;
             }
-            if (Pose is { } shown && IPhoneDuo.PictureInRender(shown, RenderSize) is { } part) picture = part;
+            if (Pose is { } shown && IPhoneDuo.PictureInRender(shown, RenderSize) is { } part)
+            {
+                picture = part;
+                _turnSince = null;
+            }
+            else if (Pose != null)
+            {
+                // Android and MuMu's window disagree on the way round: one of them has not turned yet. Wait for the
+                // other rather than put this pose's frame round a picture it does not fit; after a while (MuMu turned
+                // for an app and the pose is being put back) show what there is.
+                _turnSince ??= now;
+                if (now - _turnSince < TurnGrace)
+                {
+                    settling = true;
+                    StartVerifyBurst(10);
+                }
+            }
         }
 
         var key = new RenderKey(Frame.Key, picture.Width, picture.Height, Math.Clamp(config.Overlap, 0, 8));
+        if (_animation != null)
+        {
+            FeedAnimation(key, wr, rr, picture, settling);
+            return;
+        }
+        if (settling) return; // the frame on screen stays as it is until MuMu holds still
         if (_current == null || _current.Key != key)
         {
             // Never show a frame that doesn't match the picture; take it down until the new one is ready.
@@ -172,6 +228,211 @@ internal sealed class EmulatorSession : IDisposable
         ShowOverlay(new Point(rr.Left + picture.X - _current.RenderOffset.X, rr.Top + picture.Y - _current.RenderOffset.Y));
         EnsureStatusBar(new Point(rr.Left, rr.Top));
         EnsurePosePanel();
+        _laidOut = (wr, rr);
+    }
+
+    /// <summary>
+    /// A cheap look (a few times a second, from the app) that MuMu's window and picture are still what the frame on
+    /// screen was laid out for, and that the frame window is still up where it was put. Anything else gets a full
+    /// <see cref="Sync"/>, so a missed or early window event can never leave the frame stale until the next drag.
+    /// </summary>
+    public void Watch()
+    {
+        // Minimised or hidden: Windows hides the owned frame windows itself, and Sync leaves that alone.
+        if (_disposed || _laidOut is not { } laid || _animation != null || IsGone || IsIconic(Main) || !IsWindowVisible(Main)) return;
+        bool moved = !GetWindowRect(Main, out var wr) || !GetWindowRect(Render, out var rr) || !Same(wr, laid.Window) || !Same(rr, laid.Render);
+        bool lost = _overlay is { IsAlive: true } overlay && !overlay.IsAsSet();
+        if (!moved && !lost) return;
+        if (lost)
+        {
+            Log.Write($"'{Title}': frame window was not where it was put; putting it back");
+            _overlay!.Reassert();
+        }
+        Sync();
+    }
+
+    private static bool Same(RECT a, RECT b) => a.Left == b.Left && a.Top == b.Top && a.Right == b.Right && a.Bottom == b.Bottom;
+
+    // ---- Fold animation ------------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// Starts the animation for a pose switch, from what is on screen now (frame, live picture, glass) towards a
+    /// placeholder of the new pose (its frame, screen dark) that the real picture replaces once Android has switched.
+    /// False when it cannot or should not (setting off, Windows animations off, nothing shown yet).
+    /// </summary>
+    private bool BeginAnimation(DuoPose from, DuoPose to)
+    {
+        if (!_app.Config.DuoAnimations || !FoldAnimation.SystemAllowsAnimation() || _animation != null || _shown == null
+            || _overlay is not { IsAlive: true, IsVisible: true } overlay || !GetWindowRect(Main, out var wr) || !GetWindowRect(Render, out var rr)) return false;
+        try
+        {
+            var before = Composite(_shown, wr, _pictureOnScreen);
+            if (before == null) return false;
+            var beforeScreen = new RectangleF(overlay.Position.X, overlay.Position.Y, _shown.Width, _shown.Height);
+
+            // Where the new pose will be: MuMu turns its window for the upright poses, so predict it about the same centre.
+            bool turns = IPhoneDuo.IsUpright(to) != IPhoneDuo.IsUpright(from);
+            var render = turns ? new Size(RenderSize.Height, RenderSize.Width) : RenderSize;
+            if (_app.Library.Find(IPhoneDuo.FrameKey(to)) is not { } frame || IPhoneDuo.PictureInRender(to, render) is not { } picture) return false;
+            var rendered = FrameRenderer.Render(frame, new RenderKey(frame.Key, picture.Width, picture.Height, Math.Clamp(_app.Config.Overlap, 0, 8)));
+            var origin = turns
+                ? new Point((rr.Left + rr.Right) / 2 - render.Width / 2, (rr.Top + rr.Bottom) / 2 - render.Height / 2)
+                : new Point(rr.Left, rr.Top);
+            var afterScreen = new RectangleF(origin.X + picture.X - rendered.RenderOffset.X, origin.Y + picture.Y - rendered.RenderOffset.Y, rendered.Width, rendered.Height);
+            var placeholder = Composite(rendered, wr, null)!;
+
+            // The closed phone's hinge line in its composite: the frame's left padding and hinge barrel, at this scale.
+            var closedFrame = IPhoneDuo.IsInner(from) ? frame : Frame!;
+            var closedPicture = IPhoneDuo.IsInner(from) ? picture.Width : _pictureOnScreen.Width;
+            float hinge = (closedFrame.Screen.X - DuoFrames.Border) * (float)closedPicture / closedFrame.Screen.Width;
+
+            string? dump = _app.Config.DuoAnimationDump is { Length: > 0 } folder ? Path.Combine(folder, $"{DateTime.Now:HHmmss}-{from}-{to}") : null;
+            var animation = new FoldAnimation(Main, from, to, new FoldAnimation.End(before, beforeScreen), new FoldAnimation.End(placeholder, afterScreen), hinge, dump);
+            animation.Landed += () => _app.Post(() => OnAnimationLanded(animation));
+            _animation = animation;
+            _animationTarget = to;
+            _afterCaptured = false;
+            _afterNotBefore = DateTime.MaxValue;
+            animation.Start();
+            // The animation is the device for now: the frame and the live picture go away under it.
+            _overlay?.SetVisible(false);
+            _glass?.SetVisible(false);
+            _fade?.SetVisible(false);
+            _region = null;
+            EmulatorClip.Hide(Main, new Point((rr.Left + rr.Right) / 2 - wr.Left, (rr.Top + rr.Bottom) / 2 - wr.Top));
+            PlacePictureSoon();
+            Log.Write($"'{Title}': animating {from} -> {to}{(dump != null ? $" (frames to {dump})" : "")}");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Log.Write($"'{Title}': fold animation could not start: {ex.Message}");
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// A device image: the frame with the screen filled from the emulator window (PrintWindow sees it even while it is
+    /// hidden) or dark when <paramref name="picture"/> is null, and the glass layer, premultiplied.
+    /// </summary>
+    private Texture? Composite(RenderedFrame frame, RECT wr, Rectangle? picture) => Composite(frame, wr, picture, out _);
+
+    /// <param name="blank">The screen came out pure black: Android blanks it for a moment while it switches displays.</param>
+    private Texture? Composite(RenderedFrame frame, RECT wr, Rectangle? picture, out bool blank)
+    {
+        var pixels = new byte[frame.Width * frame.Height * 4];
+        long screenPixels = 0, black = 0;
+        Bitmap? window = null;
+        System.Drawing.Imaging.BitmapData? data = null;
+        try
+        {
+            if (picture is { } shot)
+            {
+                window = Diagnostics.PrintEmulator(Main, wr);
+                data = window.LockBits(new Rectangle(0, 0, window.Width, window.Height), System.Drawing.Imaging.ImageLockMode.ReadOnly, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+            }
+            foreach (var (y, x0, x1) in frame.ScreenRuns)
+            {
+                int dy = frame.RenderOffset.Y + y;
+                if (dy < 0 || dy >= frame.Height) continue;
+                for (int x = x0; x < x1; x++)
+                {
+                    int dx = frame.RenderOffset.X + x;
+                    if (dx < 0 || dx >= frame.Width) continue;
+                    int p = (dy * frame.Width + dx) * 4, color = unchecked((int)0xFF0B0B0D);
+                    if (data != null && picture is { } at)
+                    {
+                        int sx = at.X - wr.Left + x, sy = at.Y - wr.Top + y;
+                        if (sx >= 0 && sy >= 0 && sx < data.Width && sy < data.Height) color = System.Runtime.InteropServices.Marshal.ReadInt32(data.Scan0, sy * data.Stride + sx * 4);
+                        screenPixels++;
+                        if ((color & 0xFFFFFF) == 0) black++;
+                    }
+                    pixels[p] = (byte)color; pixels[p + 1] = (byte)(color >> 8); pixels[p + 2] = (byte)(color >> 16); pixels[p + 3] = 255;
+                }
+            }
+        }
+        finally
+        {
+            if (data != null) window!.UnlockBits(data);
+            window?.Dispose();
+        }
+        if (frame.Glass is { } glass)
+            for (int y = 0; y < glass.Bounds.Height; y++)
+                for (int x = 0; x < glass.Bounds.Width; x++)
+                {
+                    int s = (y * glass.Bounds.Width + x) * 4, a = glass.Pixels[s + 3];
+                    if (a == 0) continue;
+                    int p = ((glass.Bounds.Y + y) * frame.Width + glass.Bounds.X + x) * 4;
+                    for (int c = 0; c < 4; c++) pixels[p + c] = (byte)(glass.Pixels[s + c] + pixels[p + c] * (255 - a) / 255);
+                }
+        for (int i = 0; i < frame.Width * frame.Height; i++)
+        {
+            int a = frame.Pixels[i * 4 + 3];
+            if (a == 0) continue;
+            int p = i * 4;
+            for (int c = 0; c < 4; c++) pixels[p + c] = (byte)(frame.Pixels[p + c] + pixels[p + c] * (255 - a) / 255);
+        }
+        blank = screenPixels > 0 && black > screenPixels * 0.97;
+        return new Texture(pixels, frame.Width, frame.Height);
+    }
+
+    /// <summary>While the animation plays: keep the emulator hidden, and give it the new picture once it is there.</summary>
+    private void FeedAnimation(RenderKey key, RECT wr, RECT rr, Rectangle picture, bool settling)
+    {
+        _overlay?.SetVisible(false);
+        _glass?.SetVisible(false);
+        // Nothing for the old pose and nothing on a size on the way: the frame that matters is the new pose's, once
+        // Android has switched and MuMu has finished turning its window for it.
+        if (settling || Pose != _animationTarget) return;
+        if (_current == null || _current.Key != key)
+        {
+            if (_pending != key && Frame != null) StartRender(Frame, key);
+            return;
+        }
+        var screen = new RectangleF(rr.Left + picture.X - _current.RenderOffset.X, rr.Top + picture.Y - _current.RenderOffset.Y, _current.Width, _current.Height);
+        bool arrived = Pose == _animationTarget && _animationTarget is { } target && IPhoneDuo.PictureInRender(target, RenderSize) != null;
+        if (!arrived || DateTime.UtcNow < _afterNotBefore) return;
+        if (_afterCaptured)
+        {
+            _animation!.Retarget(screen);
+            return;
+        }
+        _pictureOnScreen = new Rectangle(rr.Left + picture.X, rr.Top + picture.Y, picture.Width, picture.Height);
+        // Android blanks the screen for a moment as it switches; take the picture once there is one (the 150 ms tick
+        // keeps coming back here), or after a second whatever it shows.
+        if (Composite(_current, wr, _pictureOnScreen, out bool blank) is { } after && (!blank || DateTime.UtcNow > _afterNotBefore.AddSeconds(1)))
+        {
+            _afterCaptured = true;
+            _animation!.SetAfter(after, screen);
+        }
+    }
+
+    private void OnAnimationLanded(FoldAnimation animation)
+    {
+        if (_animation != animation) return;
+        _animation = null;
+        _shown = null;   // put the frame bitmap in again, at full opacity
+        _fadeNext = false;
+        Sync();          // the live frame and picture, under the animation's last frame...
+        animation.FadeOut(); // ...which fades away over them
+        StartWantedPose();
+    }
+
+    /// <summary>The Duo frames for every pose at this window size, rendered ahead so a switch never waits for one.</summary>
+    private void WarmDuoFrames()
+    {
+        if (_warmed || RenderSize.Width <= 0) return;
+        _warmed = true;
+        var (library, size, overlap) = (_app.Library, RenderSize, Math.Clamp(_app.Config.Overlap, 0, 8));
+        Task.Run(() =>
+        {
+            foreach (var pose in IPhoneDuo.Poses)
+            {
+                var render = IPhoneDuo.IsUpright(pose) == size.Width < size.Height ? size : new Size(size.Height, size.Width);
+                if (library.Find(IPhoneDuo.FrameKey(pose)) is { } frame && IPhoneDuo.PictureInRender(pose, render) is { } picture)
+                    FrameRenderer.Render(frame, new RenderKey(frame.Key, picture.Width, picture.Height, overlap));
+            }
+        });
     }
 
     /// <summary>The pose buttons beside a Duo frame: where the device ends on screen, the pose, what is available.</summary>
@@ -200,7 +461,8 @@ internal sealed class EmulatorSession : IDisposable
         int border = (int)Math.Round(DuoFrames.Border * sx), hinge = Pose == DuoPose.Folded ? (int)Math.Round(DuoFrames.HingeOut * sx) : 0;
         var device = Rectangle.FromLTRB(_pictureOnScreen.Left - border - hinge, _pictureOnScreen.Top - border, _pictureOnScreen.Right + border, _pictureOnScreen.Bottom + border);
         uint dpi = GetDpiForWindow(Main);
-        _panel.Show(device, Pose, IsFoldable, dpi == 0 ? 1f : dpi / 96f);
+        _panel.Show(device, _animationTarget is { } going && _animation != null ? going : Pose, IsFoldable, dpi == 0 ? 1f : dpi / 96f);
+        WarmDuoFrames();
     }
 
     private void UpdateCompanions()
@@ -242,6 +504,42 @@ internal sealed class EmulatorSession : IDisposable
             };
         }
         _fadeTimer.Start();
+    }
+
+    /// <summary>
+    /// MuMu letterboxes its picture inside its window when the picture's shape changes without MuMu resizing the window
+    /// itself: a rotation with its window auto-rotate off, or a new resolution after a restart (it restores the old
+    /// window size). Until something resizes the window (a drag) the device sits small in a wrong-shaped window. This
+    /// does what the drag would: the window is resized around its centre to fit the picture, keeping its longer side,
+    /// so a turn swaps the window round at the same scale. True when it resized the window.
+    /// </summary>
+    private bool FitMuMuWindow(RECT wr, RECT rr)
+    {
+        int left = rr.Left - wr.Left, right = wr.Right - rr.Right, top = rr.Top - wr.Top, bottom = wr.Bottom - rr.Bottom;
+        // Normal MuMu: 4 px sides, the title bar and toolbar above, a few px below.
+        if (Peek || !WindowFit.IsLetterboxed(left, right, top, bottom))
+        {
+            _letterboxSince = null;
+            return false;
+        }
+        var picture = new Size(rr.Width, rr.Height);
+        // MuMu letterboxes for a moment in the middle of turning its own window: only a letterbox that stays is ours to fix.
+        if (_letterboxSince == null || _letterboxSize != picture)
+        {
+            (_letterboxSince, _letterboxSize) = (DateTime.UtcNow, picture);
+            StartVerifyBurst(20); // look again shortly
+            return false;
+        }
+        if (DateTime.UtcNow - _letterboxSince < TimeSpan.FromMilliseconds(700)) return false;
+        if (picture == _fittedRender && DateTime.UtcNow < _nextWindowFit) return false;
+        _fittedRender = picture;
+        _nextWindowFit = DateTime.UtcNow.AddSeconds(2);
+        var work = Screen.FromRectangle(Rectangle.FromLTRB(wr.Left, wr.Top, wr.Right, wr.Bottom)).WorkingArea;
+        var target = WindowFit.Fit(new Rectangle(wr.Left, wr.Top, wr.Width, wr.Height), picture, left, right, top, bottom, work);
+        Log.Write($"'{Title}': MuMu letterboxes its {rr.Width}x{rr.Height} picture in a {wr.Width}x{wr.Height} window; resizing it to {target.Width}x{target.Height}");
+        SetWindowPos(Main, IntPtr.Zero, target.X, target.Y, target.Width, target.Height, SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+        StartVerifyBurst(40);
+        return true;
     }
 
     /// <summary>Puts the current frame (and its glass layer, if any) at <paramref name="position"/> and shows it.</summary>
@@ -626,7 +924,7 @@ internal sealed class EmulatorSession : IDisposable
 
     private void StartWantedPose()
     {
-        if (_wantedPose is not { } pose || Instance == null || Display == null) return;
+        if (_wantedPose is not { } pose || Instance == null || Display == null || _animation != null) return;
         _wantedPose = null;
         if (!IsDuoSurface)
         {
@@ -660,11 +958,14 @@ internal sealed class EmulatorSession : IDisposable
     {
         var (instance, display) = (Instance!, Display!);
         var frame = _app.Library.Find(IPhoneDuo.FrameKey(pose));
-        RenderKey? key = frame != null && IPhoneDuo.PictureInRender(pose, RenderSize) is { } picture
+        // MuMu turns its window for the upright poses (same scale, swapped round): render for where it will be.
+        var turned = IPhoneDuo.IsUpright(pose) == RenderSize.Width < RenderSize.Height ? RenderSize : new Size(RenderSize.Height, RenderSize.Width);
+        RenderKey? key = frame != null && IPhoneDuo.PictureInRender(pose, turned) is { } picture
             ? new RenderKey(frame.Key, picture.Width, picture.Height, Math.Clamp(_app.Config.Overlap, 0, 8))
             : null;
         _nextPosePoll = DateTime.UtcNow.AddSeconds(4);
-        _fadeNext = true;
+        bool animating = Pose is { } from && from != pose && BeginAnimation(from, pose);
+        _fadeNext = !animating;
         RunAndroidTask(() =>
         {
             var rendered = key is { } k ? FrameRenderer.Render(frame!, k) : null;
@@ -684,9 +985,25 @@ internal sealed class EmulatorSession : IDisposable
                     _pending = null;
                     _current = rendered;
                 }
+                StartVerifyBurst(40); // MuMu turns or resizes its window a moment after Android: follow it within 50 ms
+                if (_animation != null)
+                {
+                    // Let the app lay itself out for the new display before the picture is taken for the animation.
+                    _afterNotBefore = DateTime.UtcNow.AddMilliseconds(140);
+                    _afterTimer ??= new System.Windows.Forms.Timer { Interval = 150 };
+                    _afterTimer.Tick -= AfterTick;
+                    _afterTimer.Tick += AfterTick;
+                    _afterTimer.Start();
+                }
                 Sync();
             };
         });
+    }
+
+    private void AfterTick(object? sender, EventArgs e)
+    {
+        if (_animation == null || _afterCaptured) _afterTimer?.Stop();
+        Sync();
     }
 
     private void PollPose()
@@ -904,9 +1221,14 @@ internal sealed class EmulatorSession : IDisposable
         var runs = _current.ScreenRuns.Select(r => (r.Y + renderOffsetInWindow.Y, r.X0 + renderOffsetInWindow.X, r.X1 + renderOffsetInWindow.X)).ToList();
         if (EmulatorClip.Apply(Main, runs) is not { } box)
         {
-            Log.Write($"Clipping failed for '{Title}'");
+            // Right after attaching, the theming layer answers our DWM change with a region of its own between our
+            // SetWindowRgn and the check. Try again in a moment rather than waiting for the next scan.
+            if (++_clipFailures <= 3 || _clipFailures % 20 == 0) Log.Write($"Clipping failed for '{Title}' (try {_clipFailures}); retrying");
+            StartVerifyBurst();
             return;
         }
+        _clipFailures = 0;
+        PlacePictureSoon();
         bool first = _region == null;
         _region = (renderOffsetInWindow, _current.Key, box);
 
@@ -915,9 +1237,9 @@ internal sealed class EmulatorSession : IDisposable
         if (first) StartVerifyBurst();
     }
 
-    private void StartVerifyBurst()
+    private void StartVerifyBurst(int ticks = 12)
     {
-        _verifyTicks = 12;
+        _verifyTicks = Math.Max(_verifyTicks, ticks);
         if (_verifyTimer == null)
         {
             _verifyTimer = new System.Windows.Forms.Timer { Interval = 50 };
@@ -936,11 +1258,42 @@ internal sealed class EmulatorSession : IDisposable
         _region = null;
         _verifyTimer?.Stop();
         EmulatorClip.Remove(Main);
+        PlacePictureSoon();
+    }
+
+    /// <summary>
+    /// After a region change: MuMu places its picture 4 px off on every frame change of its window until the window
+    /// moves (<see cref="EmulatorClip.PlacePictureAgain"/>). The clip already moves it once straight away; frame changes
+    /// that come after ours (the theming layer's region, DWM) are caught by two more moves, 150 and 500 ms after the
+    /// last region change.
+    /// </summary>
+    private void PlacePictureSoon()
+    {
+        _placeStep = 0;
+        if (_placeTimer == null)
+        {
+            _placeTimer = new System.Windows.Forms.Timer();
+            _placeTimer.Tick += (_, _) =>
+            {
+                if (_disposed || IsGone)
+                {
+                    _placeTimer?.Stop();
+                    return;
+                }
+                EmulatorClip.PlacePictureAgain(Main);
+                if (++_placeStep >= 2) _placeTimer!.Stop();
+                else _placeTimer!.Interval = 350;
+            };
+        }
+        _placeTimer.Stop();
+        _placeTimer.Interval = 150;
+        _placeTimer.Start();
     }
 
     /// <summary>Gives the emulator its normal look back and hides the frame (keeps the rendered bitmap for later).</summary>
     public void Suspend()
     {
+        _laidOut = null;
         _overlay?.SetVisible(false);
         _glass?.SetVisible(false);
         _panel?.Hide();
@@ -980,6 +1333,8 @@ internal sealed class EmulatorSession : IDisposable
         ClearRegion();
         _verifyTimer?.Dispose();
         _verifyTimer = null;
+        _placeTimer?.Dispose();
+        _placeTimer = null;
         _barTimer?.Dispose();
         _barTimer = null;
         if (_bar is { IsAlive: true }) _bar.DestroyHandle();
@@ -988,6 +1343,10 @@ internal sealed class EmulatorSession : IDisposable
         _glass = null;
         _panel?.Dispose();
         _panel = null;
+        _animation?.Dispose();
+        _animation = null;
+        _afterTimer?.Dispose();
+        _afterTimer = null;
         _fadeTimer?.Dispose();
         _fadeTimer = null;
         if (_fade is { IsAlive: true }) _fade.DestroyHandle();

@@ -3,7 +3,7 @@ namespace MuMuDeviceFrames;
 /// <summary>
 /// Empties Android's status bar so an iOS-style one can be drawn over it. SystemUI's icon blocklist (the System UI
 /// Tuner setting) hides the clock and every system icon; notification icons are switched off by the SystemUI overlay
-/// (<see cref="AndroidCutout"/>). Plain shell settings — no root — undone by <see cref="Restore"/>.
+/// (<see cref="AndroidCutout"/>). Plain shell settings (no root), undone by <see cref="Restore"/>.
 /// Demo mode is deliberately not used: its fake network model draws a satellite icon the blocklist can't hide.
 /// </summary>
 internal static class AndroidStatusBar

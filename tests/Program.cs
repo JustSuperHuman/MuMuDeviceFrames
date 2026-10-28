@@ -191,3 +191,15 @@ Check(Equals(Call("IPhoneDuo", "Toggle", HalfOpen), Folded) && Equals(Call("IPho
 Check(Equals(Call("IPhoneDuo", "ToggleHalf", Open), HalfOpen) && Equals(Call("IPhoneDuo", "ToggleHalf", HalfOpen), Open), "Book hotkey: open half opens, half open flattens");
 Check(Equals(Call("IPhoneDuo", "ToggleHalf", OpenPortrait), Tabletop) && Equals(Call("IPhoneDuo", "ToggleHalf", Tabletop), OpenPortrait),
     "Book hotkey keeps the way round: open portrait and tabletop swap");
+
+// MuMu's window after a turn it did not follow: the turned picture sits centred in the old landscape window, which only
+// a drag used to fix. MuMu's own toolbar beside the picture (unequal margins) is not that.
+Check((bool)Call("WindowFit", "IsLetterboxed", 230, 230, 40, 3)!, "A portrait picture centred in a landscape window is letterboxed");
+Check(!(bool)Call("WindowFit", "IsLetterboxed", 4, 4, 40, 3)! && !(bool)Call("WindowFit", "IsLetterboxed", 4, 60, 40, 3)!,
+    "MuMu's normal 4 px sides, or its side toolbar, are not letterboxing");
+// The fix keeps the scale: a 1009 x 769 picture area turned is 769 x 1009 in a window of the same chrome, same centre.
+var fitted = (System.Drawing.Rectangle)Call("WindowFit", "Fit", new System.Drawing.Rectangle(100, 300, 1017, 812), new System.Drawing.Size(586, 769), 215, 216, 40, 3,
+    new System.Drawing.Rectangle(0, 0, 3840, 2100))!;
+Check(fitted.Width == 769 + 8 && fitted.Height == 1009 + 43 && Math.Abs(fitted.X + fitted.Width / 2 - (100 + 1017 / 2)) <= 1
+      && Math.Abs(fitted.Y + fitted.Height / 2 - (300 + 812 / 2)) <= 1,
+    $"Letterboxed window refitted round its centre at the same scale ({fitted})");

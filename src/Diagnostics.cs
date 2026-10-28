@@ -50,7 +50,7 @@ internal static class Diagnostics
     }
 
     /// <summary>
-    /// Reproduces what the desktop compositor shows — emulator window clipped to the screen shape, frame blended on top —
+    /// Reproduces what the desktop compositor shows (emulator window clipped to the screen shape, frame blended on top),
     /// from the window's own pixels, so alignment can be checked even while the emulator is covered by other windows.
     /// </summary>
     public static int Snapshot(string title, string outPath, string? frameKey, string? background = null)
@@ -223,7 +223,7 @@ internal static class Diagnostics
         return main;
     }
 
-    private static Bitmap PrintEmulator(IntPtr main, RECT wr)
+    internal static Bitmap PrintEmulator(IntPtr main, RECT wr)
     {
         var window = new Bitmap(wr.Width, wr.Height, PixelFormat.Format32bppArgb);
         using var g = Graphics.FromImage(window);

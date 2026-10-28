@@ -77,6 +77,12 @@ internal sealed class AppConfig
     /// <summary>The pose control beside an iPhone Duo frame.</summary>
     public bool DuoPoseControls { get; set; } = true;
 
+    /// <summary>Animate folding and unfolding (also off when Windows' "Animation effects" are off).</summary>
+    public bool DuoAnimations { get; set; } = true;
+
+    /// <summary>A folder to write every animation frame to as PNG (at exactly 60 fps), for making videos. Null = off.</summary>
+    public string? DuoAnimationDump { get; set; }
+
     /// <summary>Last emulator brought to the front, used when an Expo hotkey runs from another app.</summary>
     public string? LastActiveEmulator { get; set; }
 

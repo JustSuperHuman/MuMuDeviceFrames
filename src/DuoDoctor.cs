@@ -35,13 +35,13 @@ internal static class DuoDoctor
         string autoRotate = MuMuControl.GetSetting(instance, "window_auto_rotate") ?? "?";
         bool surface = IPhoneDuo.IsSurface(display.Native) && display.Density == IPhoneDuo.Density;
         bool foldable = display.Duo?.Foldable == true;
-        if (!surface || !foldable || autoRotate != "false")
+        if (!surface || !foldable)
         {
             string missing = string.Join(", ", new[]
             {
                 surface ? null : $"surface (is {display.Native.Width}x{display.Native.Height} @ {display.Density} dpi)",
                 foldable ? null : "foldable device states",
-                autoRotate == "false" ? null : "MuMu window auto-rotate off",
+
             }.Where(m => m != null));
             if (!repair)
             {
@@ -58,8 +58,17 @@ internal static class DuoDoctor
         }
         else
         {
-            Add(Outcome.Ok, $"Surface {IPhoneDuo.Surface.Width}x{IPhoneDuo.Surface.Height} at {IPhoneDuo.Density} dpi, MuMu window auto-rotate off.");
+            Add(Outcome.Ok, $"Surface {IPhoneDuo.Surface.Width}x{IPhoneDuo.Surface.Height} at {IPhoneDuo.Density} dpi.");
             Add(Outcome.Ok, "Device states CLOSED (0), HALF_OPENED (1), OPENED (2).");
+        }
+
+        // MuMu has to turn its window with Android (it is live, no restart); off, the picture shrinks into the old window.
+        if (autoRotate == "true") Add(Outcome.Ok, "MuMu turns its window with Android (window_auto_rotate on).");
+        else if (!repair) Add(Outcome.Failed, "MuMu window auto-rotate is off: turning the display leaves the picture letterboxed.");
+        else
+        {
+            MuMuControl.SetSettings(instance, ("window_auto_rotate", "true"));
+            Add(Outcome.Fixed, "Turned MuMu's window auto-rotate on.");
         }
 
         // 2. What apps need to get the fold: Jetpack's OEM library and the postures mapping.

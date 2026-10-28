@@ -22,6 +22,7 @@ internal sealed class TrayApp : ApplicationContext
     private readonly ContextMenuStrip _sessionMenu = new();
     private readonly HiddenWindow _window;
     private readonly System.Windows.Forms.Timer _scanTimer;
+    private readonly System.Windows.Forms.Timer _watchTimer;
     private readonly SynchronizationContext _ui;
     private readonly Dictionary<IntPtr, EmulatorSession> _sessions = [];
     private readonly Dictionary<uint, bool> _pidIsEmulator = [];
@@ -62,6 +63,10 @@ internal sealed class TrayApp : ApplicationContext
         _scanTimer = new System.Windows.Forms.Timer { Interval = 1500 };
         _scanTimer.Tick += (_, _) => Scan();
         _scanTimer.Start();
+        // Between scans: a cheap check that every frame still matches its emulator (see EmulatorSession.Watch).
+        _watchTimer = new System.Windows.Forms.Timer { Interval = 250 };
+        _watchTimer.Tick += (_, _) => { foreach (var session in _sessions.Values.ToArray()) session.Watch(); };
+        _watchTimer.Start();
         Scan();
         _foregroundChanged = (_, _, hwnd, _, _, _, _) => TrackActiveEmulator(hwnd);
         _foregroundHook = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, IntPtr.Zero,
@@ -97,7 +102,7 @@ internal sealed class TrayApp : ApplicationContext
             Config.FramesRoot = root;
             Config.Save();
         }
-        var progress = new Progress<string>(text => _tray.Text = $"MuMu Device Frames — {text}");
+        var progress = new Progress<string>(text => _tray.Text = $"MuMu Device Frames: {text}");
         Task.Run(async () =>
         {
             try
@@ -445,6 +450,11 @@ internal sealed class TrayApp : ApplicationContext
                 });
             }
             items.Add(new MenuItem("Check iPhone Duo…", null, () => CheckDuo(session)) { Enabled = connected, Hint = "Repairs" });
+            items.Add(Check("Animate folding", Config.DuoAnimations, () =>
+            {
+                Config.DuoAnimations = !Config.DuoAnimations;
+                Config.Save();
+            }, hint: FoldAnimation.SystemAllowsAnimation() ? null : "Windows animations are off"));
             items.Add(Check("Show pose controls", Config.DuoPoseControls, () =>
             {
                 Config.DuoPoseControls = !Config.DuoPoseControls;
@@ -782,7 +792,7 @@ internal sealed class TrayApp : ApplicationContext
                     try { FramedScreenshot.CopyToClipboard(png); }
                     catch (Exception ex) { error = $"clipboard is busy ({ex.Message})"; }
                 }
-                Notify(error == null ? $"Copied {title} in {frame.Model} — paste it anywhere" : $"Screenshot failed: {error}", error != null);
+                Notify(error == null ? $"Copied {title} in {frame.Model}. Paste it anywhere." : $"Screenshot failed: {error}", error != null);
             });
         });
     }
@@ -883,6 +893,7 @@ internal sealed class TrayApp : ApplicationContext
         Config.StatusBarClock = fresh.StatusBarClock; Config.StatusBarFont = fresh.StatusBarFont; Config.IosStatusBar = fresh.IosStatusBar;
         Config.LastActiveEmulator = fresh.LastActiveEmulator;
         Config.RecordingPadding = fresh.RecordingPadding;
+        Config.DuoPoseControls = fresh.DuoPoseControls; Config.DuoAnimations = fresh.DuoAnimations; Config.DuoAnimationDump = fresh.DuoAnimationDump;
         Config.ShareXExecutable = fresh.ShareXExecutable;
         bool interactiveChanged = Config.BezelInteractive != fresh.BezelInteractive;
         Config.BezelInteractive = fresh.BezelInteractive;
@@ -1090,6 +1101,7 @@ internal sealed class TrayApp : ApplicationContext
     public void Shutdown()
     {
         _scanTimer.Stop();
+        _watchTimer.Stop();
         if (_foregroundHook != IntPtr.Zero) UnhookWinEvent(_foregroundHook);
         foreach (var session in _sessions.Values) session.Dispose();
         _sessions.Clear();

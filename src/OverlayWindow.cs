@@ -90,6 +90,22 @@ internal sealed class OverlayWindow : NativeWindow
 
     public Point Position => _position;
 
+    /// <summary>The window really is shown (or hidden) and placed as this object last set it.</summary>
+    public bool IsAsSet()
+    {
+        if (!IsAlive) return true;
+        if (IsWindowVisible(Handle) != _visible) return false;
+        return !_visible || (GetWindowRect(Handle, out var r) && r.Left == _position.X && r.Top == _position.Y);
+    }
+
+    /// <summary>Applies the last visibility and position again (after something else hid or moved the window).</summary>
+    public void Reassert()
+    {
+        if (!IsAlive) return;
+        SetWindowPos(Handle, IntPtr.Zero, _position.X, _position.Y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+        ShowWindow(Handle, _visible ? SW_SHOWNA : SW_HIDE);
+    }
+
     public void MoveTo(Point position)
     {
         if (!IsAlive || position == _position) return;

@@ -103,7 +103,7 @@ internal static class IosStatusBar
         }
         x -= gap;
 
-        // Wi-Fi: iOS's fan — a wedge at the bottom and two filled bands above it, each 90° wide, 16 × 11.5 pt.
+        // Wi-Fi: iOS's fan, a wedge at the bottom and two filled bands above it, each 90° wide, 16 × 11.5 pt.
         float ww = 16.3f * pt;
         x -= ww;
         {

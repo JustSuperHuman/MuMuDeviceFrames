@@ -53,7 +53,7 @@ internal static class DuoSetup
             "-k", "resolution_width.custom", "-val", IPhoneDuo.Surface.Width.ToString(),
             "-k", "resolution_height.custom", "-val", IPhoneDuo.Surface.Height.ToString(),
             "-k", "resolution_dpi.custom", "-val", IPhoneDuo.Density.ToString(),
-            "-k", "window_auto_rotate", "-val", "false",
+            "-k", "window_auto_rotate", "-val", "true",
             "-k", "root_permission", "-val", "true"]);
 
         Say("starting it (the first start takes a little longer)");
@@ -92,8 +92,9 @@ internal static class DuoSetup
         bool resize = !IPhoneDuo.IsSurface(display.Native) || display.Density != IPhoneDuo.Density;
         bool addStates = display.Duo?.Foldable != true;
 
-        // MuMu turns its window (and Android with it) to follow the app in front; the Duo surface has to stay put.
-        MuMuControl.SetSettings(instance, ("window_auto_rotate", "false"));
+        // MuMu must turn its window with Android (the open portrait and tabletop poses turn the display); with this off
+        // it keeps the old window and letterboxes the picture inside it until the window is dragged.
+        MuMuControl.SetSettings(instance, ("window_auto_rotate", "true"));
         if (resize) MuMuControl.SetResolution(instance, IPhoneDuo.Surface, IPhoneDuo.Density);
 
         if (addStates)
