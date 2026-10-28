@@ -1,12 +1,12 @@
 # MuMu Device Frames
 
-Real iPhone, Pixel and Galaxy frames around running [MuMu Player](https://www.mumuplayer.com/) windows — live on your
+Real iPhone, Pixel and Galaxy frames around running [MuMu Player](https://www.mumuplayer.com/) windows, live on your
 desktop, for screen recordings and app demos. No injection, no root, no emulator changes: a tray app that attaches a
 frame to each emulator and teaches the emulator's Android about it.
 
 ![Three MuMu emulators framed as iPhone 17 Pro Max, iPhone 17 Pro and Pixel 9 Pro XL](docs/hero.png)
 
-Built to record ads for [JustGains](https://justgains.com) — the app in the screenshots — and released because there
+Built to record ads for [JustGains](https://justgains.com) (the app in the screenshots) and released because there
 was nothing like it.
 
 ## What it does
@@ -14,7 +14,7 @@ was nothing like it.
 ![Stock MuMu window next to the same emulator with a device frame](docs/before-after.png)
 
 - **The frame belongs to the emulator, not to the top of the screen.** It sits directly above its emulator in the
-  window stack, so anything you place over the emulator — captions, an overlay, a second app — covers the frame too.
+  window stack, so anything you place over the emulator (captions, an overlay, a second app) covers the frame too.
   Minimize, restore, move: the frame follows.
 - **The MuMu window disappears.** Title bar, toolbar, borders and window shadow are gone; only the phone's rounded screen
   is left. On a chroma-key desktop you get phone + key colour and nothing else.
@@ -25,8 +25,8 @@ was nothing like it.
   at native resolution (1520 × 3068 for a 17 Pro Max), whatever is covering the emulator window. **Copy**
   puts the same PNG, transparent corners included, straight on the clipboard for Figma, Photoshop, Slack
   or a chat window.
-- **145 frames** from the open [device-frames-media](https://github.com/jonnyjackson26/device-frames-media) set —
-  iPhone 6s to 17 Pro Max, iPhone Air, Pixel 8/9, Galaxy S21, iPads, Apple Watch — downloaded on first run.
+- **145 frames** from the open [device-frames-media](https://github.com/jonnyjackson26/device-frames-media) set
+  (iPhone 6s to 17 Pro Max, iPhone Air, Pixel 8/9, Galaxy S21, iPads, Apple Watch), downloaded on first run.
 - **iPhone Duo, folding live.** Closed, half open and open frames for Apple's foldable, drawn by the app itself, and
   a switch that changes the emulator between them in under a second, with no restart. Android itself is made a
   foldable, so apps get the fold through Jetpack WindowManager. See [iPhone Duo](#iphone-duo).
@@ -48,7 +48,7 @@ irm https://raw.githubusercontent.com/JustSuperHuman/MuMuDeviceFrames/main/insta
 
 That installs the latest release to `%LOCALAPPDATA%\Programs\MuMuDeviceFrames`, downloads the frame set (~35 MB, once),
 adds a Start menu shortcut, turns on **Start with Windows** and starts the tray app. Run it again to update.
-Then start a MuMu emulator. It gets the frame that best fits its picture — with MuMu's default phone resolution that is
+Then start a MuMu emulator. It gets the frame that best fits its picture: with MuMu's default phone resolution that is
 an iPhone 16 Pro / 17 Pro.
 
 Options (pass them through a script block):
@@ -93,7 +93,7 @@ emulator name, such as `--expo-reload JG-2`, to target one directly.
 
 Frame menus mark each model **Exact fit** / **Near fit** for that emulator's picture. A frame whose screen aspect is
 within 1.5 % of the emulator's is stretched to fit exactly (invisible); anything further off keeps its proportions and
-crops the picture under the bezel — or use **Android display ▸ Set resolution to W×H**, which writes the frame's exact
+crops the picture under the bezel, or use **Android display ▸ Set resolution to W×H**, which writes the frame's exact
 screen resolution into MuMu's settings (density scaled so the app layout keeps its size) and restarts that emulator.
 
 Landscape: when MuMu rotates its window, the frame rotates with it (phone top to the left).
@@ -287,7 +287,7 @@ and the Android-matching switch are stored per emulator name. `log.txt` is next 
 | `ProcessNames` | `MuMuNxDevice, MuMuPlayer, NemuPlayer` | Emulator executables to attach to |
 
 Command line: `--exit` (quit the running instance cleanly) · `--expo-reload [emulator]` / `--expo-gear [emulator]` (Expo actions; omit the name to use the running tray app) · `--startup on|off` (start with Windows) · `--restore` (un-clip all emulator windows; only needed if
-the app was killed — starting it again does the same) · `--download [folder]` (fetch the frame set) ·
+the app was killed; starting it again does the same) · `--download [folder]` (fetch the frame set) ·
 `--screenshot <emulator> <out.png> [frame] [transparent|checker|#RRGGBB]` (framed screenshot at native resolution) ·
 `--snapshot <emulator> <out.png> [frame|-] [background]` (composite of the window and the frame, for checking
 alignment) · `--render <frame> <w> <h> <out.png>` · `--cutout-spec <frame> <w> <h> <dpi>` ·
@@ -301,7 +301,7 @@ Three window-manager features, all from outside the MuMu process:
 
 1. **Owned layered window.** Each frame is a per-pixel-alpha window (`UpdateLayeredWindow`) whose *owner* is the
    emulator's top-level window. Windows keeps an owned window immediately above its owner and minimizes, restores and
-   destroys it with the owner — that is the "attached but not topmost" behaviour, done by the window manager itself.
+   destroys it with the owner: that is the "attached but not topmost" behaviour, done by the window manager itself.
    Transparent pixels are click-through; only the bezel takes mouse input, and dragging it moves both windows in one
    `DeferWindowPos` batch.
 2. **Window region.** `SetWindowRgn` on the emulator, built from the frame's `mask.png`, hides everything but the
@@ -316,7 +316,7 @@ picture size with a separable Lanczos-3 filter in premultiplied alpha, with the 
 pixels; about 70 ms, cached and shared between emulators of the same size. Everything is reverted on exit.
 
 Why not a Windhawk mod or a DLL in MuMu: injected code can only draw inside MuMu's window, and the bezel lives outside
-it. A second window is needed either way — and with one, nothing has to run inside the emulator process.
+it. A second window is needed either way, and with one nothing has to run inside the emulator process.
 
 ## Known limits
 
@@ -357,4 +357,4 @@ dotnet run --project tests/AndroidTools.Tests.csproj -c Release
   (`src/DuoFrames.cs`).
 - Written for [JustGains](https://justgains.com), the workout and nutrition app in the screenshots.
 
-MIT — see [LICENSE](LICENSE).
+MIT, see [LICENSE](LICENSE).
