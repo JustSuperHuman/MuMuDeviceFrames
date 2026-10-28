@@ -13,6 +13,10 @@ internal sealed class EmulatorSession : IDisposable
     private OverlayWindow? _overlay;
     private OverlayWindow? _glass; // click-through layer over the picture (the open iPhone Duo's crease)
     private DuoPosePanel? _panel;  // iPhone Duo pose buttons beside the frame
+    private OverlayWindow? _chrome; // iOS chrome over the picture: home indicator, or the Duo's rail / status bar
+    private (ChromeState State, Size Picture)? _chromeShown;
+    private System.Windows.Forms.Timer? _chromeTimer;
+    private bool _chromeDark, _chromePolling, _duoBarHidden;
     private OverlayWindow? _fade;  // the previous frame, fading out over a pose switch
     private System.Windows.Forms.Timer? _fadeTimer;
     private DateTime _fadeStart;
@@ -54,6 +58,10 @@ internal sealed class EmulatorSession : IDisposable
     private static readonly TimeSpan TurnGrace = TimeSpan.FromSeconds(2);
     private System.Windows.Forms.Timer? _placeTimer; // MuMu's picture placed again after region changes (see PlacePictureSoon)
     private int _placeStep;
+    private bool _userMoving;               // inside Windows' move / size loop on MuMu's window (its title bar or border)
+    private bool _reanchor;                 // a user drag just ended: the next layout's centre is the new anchor
+    private int _anchorMoves;               // window moves in a row that did not bring the device to its anchor
+    private System.Windows.Forms.Timer? _anchorSave;
 
     /// <summary>adb endpoint and native display, known a moment after attaching (null until then).</summary>
     public MuMuInstance? Instance { get; private set; }
@@ -96,12 +104,21 @@ internal sealed class EmulatorSession : IDisposable
         const uint flags = WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS;
         _hooks.Add(SetWinEventHook(EVENT_OBJECT_DESTROY, EVENT_OBJECT_LOCATIONCHANGE, IntPtr.Zero, _eventProc, pid, 0, flags));
         _hooks.Add(SetWinEventHook(EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MINIMIZEEND, IntPtr.Zero, _eventProc, pid, 0, flags));
+        _hooks.Add(SetWinEventHook(EVENT_SYSTEM_MOVESIZESTART, EVENT_SYSTEM_MOVESIZEEND, IntPtr.Zero, _eventProc, pid, 0, flags));
         Log.Write($"Attached to '{title}' (pid {pid}, hwnd 0x{main:X}, render 0x{render:X})");
     }
 
     private void OnWinEvent(IntPtr hook, uint evt, IntPtr hwnd, int idObject, int idChild, uint thread, uint time)
     {
         if (idObject != 0 || idChild != 0 || (hwnd != Main && hwnd != Render)) return;
+        // The user dragging or resizing MuMu's own window (title bar, border): that moves the device on purpose.
+        if (evt is EVENT_SYSTEM_MOVESIZESTART or EVENT_SYSTEM_MOVESIZEEND && hwnd == Main)
+        {
+            _userMoving = evt == EVENT_SYSTEM_MOVESIZESTART;
+            if (!_userMoving) _reanchor = true;
+            Sync();
+            return;
+        }
         if (evt is EVENT_OBJECT_LOCATIONCHANGE or EVENT_OBJECT_SHOW or EVENT_OBJECT_HIDE or EVENT_OBJECT_DESTROY
             or EVENT_SYSTEM_MINIMIZESTART or EVENT_SYSTEM_MINIMIZEEND)
             Sync();
@@ -222,13 +239,173 @@ internal sealed class EmulatorSession : IDisposable
             if (_pending != key) StartRender(Frame, key);
             return;
         }
+        if (KeepPut(wr, rr, picture)) return; // MuMu's window moves to the anchor; Sync runs again on the move
 
         ApplyRegion(new Point(rr.Left - wr.Left + picture.X, rr.Top - wr.Top + picture.Y));
         _pictureOnScreen = new Rectangle(rr.Left + picture.X, rr.Top + picture.Y, picture.Width, picture.Height);
         ShowOverlay(new Point(rr.Left + picture.X - _current.RenderOffset.X, rr.Top + picture.Y - _current.RenderOffset.Y));
         EnsureStatusBar(new Point(rr.Left, rr.Top));
+        EnsureChrome();
         EnsurePosePanel();
         _laidOut = (wr, rr);
+    }
+
+    /// <summary>
+    /// The iOS chrome the tool owns, besides the status bar: the home indicator on iPhone frames (with the iOS chrome
+    /// on and the model having one), the rail or status bar on the iPhone Duo. On the Duo, Android's own status bar is
+    /// emptied too; insets stay as they are (the app reserves the rail).
+    /// </summary>
+    private ChromeState? CurrentChrome()
+    {
+        if (Frame is not { } frame || Display is not { } display || !_app.Config.IosStatusBarFor(Title, frame)) return null;
+        bool duo = IPhoneDuo.IsDuo(frame);
+        if (duo && Pose == null) return null;
+        bool home = IosChrome.HomeIndicator(frame);
+        var kind = IosChrome.KindFor(frame, Pose);
+        if (kind == ChromeKind.None && !home) return null;
+        var screen = duo && Pose is { } pose ? IPhoneDuo.ScreenSize(pose) : display.Native;
+        return new ChromeState(kind, home, screen, display.DensityOverride ?? display.Density, _barApplied ? _barDark : _chromeDark,
+            IosStatusBar.ClockText(_app.Config.StatusBarClock));
+    }
+
+    private void EnsureChrome()
+    {
+        var state = CurrentChrome();
+        bool duo = IPhoneDuo.IsDuo(Frame) && state != null;
+        if (duo != _duoBarHidden && Instance is { } instance && !_androidBusy)
+        {
+            // The Duo's iOS chrome replaces Android's status bar content in every pose.
+            _duoBarHidden = duo;
+            var sdk = _app.Config.AndroidSdk;
+            RunAndroidTask(() =>
+            {
+                string? error = null;
+                if (duo)
+                {
+                    AndroidStatusBar.Hide(instance);
+                    error = AndroidCutout.ApplyDuo(instance, sdk);
+                }
+                else
+                {
+                    AndroidStatusBar.Restore(instance);
+                }
+                bool dark = AndroidStatusBar.WantsDarkGlyphs(instance);
+                return () =>
+                {
+                    _chromeDark = dark;
+                    Log.Write(error == null ? $"'{Title}': Android status bar {(duo ? "emptied for the iPhone Duo's chrome" : "back")}" : $"'{Title}': Duo status bar overlay: {error}");
+                    Sync();
+                };
+            });
+        }
+        if (state == null || _pictureOnScreen.Width <= 0)
+        {
+            _chrome?.SetVisible(false);
+            _chromeTimer?.Stop();
+            return;
+        }
+        if (_chromeTimer == null)
+        {
+            _chromeTimer = new System.Windows.Forms.Timer { Interval = 1000 };
+            _chromeTimer.Tick += (_, _) => { if (!_disposed) { PollChromeTheme(); EnsureChrome(); } };
+        }
+        _chromeTimer.Start();
+        if (_chrome is not { IsAlive: true })
+        {
+            try
+            {
+                _chrome = new OverlayWindow(Main, interactive: false); // over the app, never in the way of a tap
+                _chromeShown = null;
+            }
+            catch (Exception ex)
+            {
+                Log.Write($"Chrome window failed for '{Title}': {ex.Message}");
+                return;
+            }
+        }
+        var picture = _pictureOnScreen.Size;
+        if (_chromeShown is not { } shown || shown.State != state || shown.Picture != picture)
+        {
+            _chrome.SetBitmap(IosChrome.Render(picture, state, IosStatusBar.Family(_app.Config.StatusBarFont)), picture.Width, picture.Height, _pictureOnScreen.Location);
+            _chromeShown = (state, picture);
+        }
+        else _chrome.MoveTo(_pictureOnScreen.Location);
+        _chrome.SetVisible(true);
+    }
+
+    /// <summary>Light or dark glyphs, as the app in front asks (the iOS bar polls this itself when it runs).</summary>
+    private void PollChromeTheme()
+    {
+        if (_chromePolling || _barApplied || Instance is not { } instance) return;
+        _chromePolling = true;
+        Task.Run(() =>
+        {
+            bool dark = false;
+            try { dark = AndroidStatusBar.WantsDarkGlyphs(instance); } catch { /* keep the last answer */ }
+            _app.Post(() => { _chromePolling = false; _chromeDark = dark; });
+        });
+    }
+
+    /// <summary>What a framed screenshot needs to draw the same chrome.</summary>
+    public ChromeState? ChromeForScreenshot() => CurrentChrome();
+
+    /// <summary>
+    /// Keeps the device where the user put it. Whenever the frame would land off the anchor (a pose switch, a turn, a
+    /// new size, a restart, MuMu restoring its saved window position: MuMu moves its own window for all of those),
+    /// MuMu's window is moved so the frame's centre is on the anchor again, kept fully on that monitor's work area.
+    /// Only the user moves the anchor: dragging the device by its bezel, or Windows' move / size loop on MuMu's own
+    /// window (its title bar or border). True when it moved the window.
+    /// </summary>
+    private bool KeepPut(RECT wr, RECT rr, Rectangle picture)
+    {
+        if (Peek || _current == null) return false;
+        var frame = new Rectangle(rr.Left + picture.X - _current.RenderOffset.X, rr.Top + picture.Y - _current.RenderOffset.Y, _current.Width, _current.Height);
+        var centre = DeviceAnchor.Centre(frame);
+        var config = _app.Config.Instance(Title);
+        if (config.Anchor == null || _userMoving || _reanchor || _overlay?.IsDragging == true)
+        {
+            _reanchor = false;
+            _anchorMoves = 0;
+            if (config.Anchor is { } old && old.X == centre.X && old.Y == centre.Y) return false;
+            config.Anchor = new AnchorPoint(centre.X, centre.Y);
+            SaveAnchorSoon();
+            return false;
+        }
+        var anchor = config.Anchor.ToPoint();
+        var target = DeviceAnchor.Place(frame.Size, anchor, Screen.FromPoint(anchor).WorkingArea);
+        int dx = target.X - frame.X, dy = target.Y - frame.Y;
+        if (Math.Abs(dx) <= 1 && Math.Abs(dy) <= 1)
+        {
+            _anchorMoves = 0;
+            return false;
+        }
+        // A window that will not go where it is put (MuMu clamping it, say) gets a few tries, then is left be.
+        if (++_anchorMoves > 3)
+        {
+            if (_anchorMoves == 4) Log.Write($"'{Title}': MuMu's window does not stay at the device's place ({dx}, {dy} px off); leaving it");
+            return false;
+        }
+        Log.Write($"'{Title}': keeping the device at {anchor.X},{anchor.Y}: frame centre was {centre.X},{centre.Y}, moving MuMu's window by {dx},{dy}" +
+            (target.Location != new Point(anchor.X - frame.Width / 2, anchor.Y - frame.Height / 2) ? " (kept on the work area)" : ""));
+        SetWindowPos(Main, IntPtr.Zero, wr.Left + dx, wr.Top + dy, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+        StartVerifyBurst(10);
+        return true;
+    }
+
+    /// <summary>A drag sets the anchor many times a second; it goes to disk once the device has stayed put a moment.</summary>
+    private void SaveAnchorSoon()
+    {
+        if (_anchorSave == null)
+        {
+            _anchorSave = new System.Windows.Forms.Timer { Interval = 800 };
+            _anchorSave.Tick += (_, _) =>
+            {
+                _anchorSave!.Stop();
+                _app.Config.Save();
+            };
+        }
+        _anchorSave.Stop();
+        _anchorSave.Start();
     }
 
     /// <summary>
@@ -279,6 +456,12 @@ internal sealed class EmulatorSession : IDisposable
                 ? new Point((rr.Left + rr.Right) / 2 - render.Width / 2, (rr.Top + rr.Bottom) / 2 - render.Height / 2)
                 : new Point(rr.Left, rr.Top);
             var afterScreen = new RectangleF(origin.X + picture.X - rendered.RenderOffset.X, origin.Y + picture.Y - rendered.RenderOffset.Y, rendered.Width, rendered.Height);
+            if (!Peek && _app.Config.Instance(Title).Anchor is { } anchor)
+            {
+                // The device lands where it lives (KeepPut moves MuMu's window there before the new picture is taken).
+                var landing = DeviceAnchor.Place(new Size(rendered.Width, rendered.Height), anchor.ToPoint(), Screen.FromPoint(anchor.ToPoint()).WorkingArea);
+                afterScreen = new RectangleF(landing.X, landing.Y, landing.Width, landing.Height);
+            }
             var placeholder = Composite(rendered, wr, null)!;
 
             // The closed phone's hinge line in its composite: the frame's left padding and hinge barrel, at this scale.
@@ -297,6 +480,7 @@ internal sealed class EmulatorSession : IDisposable
             // The animation is the device for now: the frame and the live picture go away under it.
             _overlay?.SetVisible(false);
             _glass?.SetVisible(false);
+            _chrome?.SetVisible(false);
             _fade?.SetVisible(false);
             _region = null;
             EmulatorClip.Hide(Main, new Point((rr.Left + rr.Right) / 2 - wr.Left, (rr.Top + rr.Bottom) / 2 - wr.Top));
@@ -381,6 +565,7 @@ internal sealed class EmulatorSession : IDisposable
     {
         _overlay?.SetVisible(false);
         _glass?.SetVisible(false);
+        _chrome?.SetVisible(false);
         // Nothing for the old pose and nothing on a size on the way: the frame that matters is the new pose's, once
         // Android has switched and MuMu has finished turning its window for it.
         if (settling || Pose != _animationTarget) return;
@@ -389,6 +574,7 @@ internal sealed class EmulatorSession : IDisposable
             if (_pending != key && Frame != null) StartRender(Frame, key);
             return;
         }
+        if (KeepPut(wr, rr, picture)) return; // hidden under the animation: put it where it will land first
         var screen = new RectangleF(rr.Left + picture.X - _current.RenderOffset.X, rr.Top + picture.Y - _current.RenderOffset.Y, _current.Width, _current.Height);
         bool arrived = Pose == _animationTarget && _animationTarget is { } target && IPhoneDuo.PictureInRender(target, RenderSize) != null;
         if (!arrived || DateTime.UtcNow < _afterNotBefore) return;
@@ -604,7 +790,7 @@ internal sealed class EmulatorSession : IDisposable
     private void EnsureStatusBar(Point picture)
     {
         // Never on the iPhone Duo: the app draws the time and status in its own rail there.
-        bool wanted = _app.Config.IosStatusBarFor(Title) && Instance != null && Display != null && Frame != null && !IPhoneDuo.IsDuo(Frame);
+        bool wanted = _app.Config.IosStatusBarFor(Title, Frame) && Instance != null && Display != null && Frame != null && !IPhoneDuo.IsDuo(Frame);
         // Drawing the bar alone does not reserve space in apps. Wait for Android's matching insets before covering it.
         wanted = wanted && _app.Config.Instance(Title).InstalledCutout ==
             AndroidCutout.Signature(Frame!, Display!, _app.Config.StatusBarPaddingFactor, hideNotificationIcons: true);
@@ -635,7 +821,7 @@ internal sealed class EmulatorSession : IDisposable
 
         if (_barLayout == null || _barLayoutFrame != Frame!.Key)
         {
-            var spec = AndroidCutout.Measure(Frame!, Display!, _app.Config.StatusBarPaddingFactor);
+            var spec = AndroidCutout.Measure(Frame!, Display!, _app.Config.StatusBarPaddingFactor, ios: true);
             if (spec == null) return;
             _barLayout = StatusBarLayout.From(spec, Display!);
             _barLayoutFrame = Frame!.Key;
@@ -763,14 +949,14 @@ internal sealed class EmulatorSession : IDisposable
             }
         }
 
-        if (!_app.Config.CutoutFor(Title) || IPhoneDuo.IsDuo(Frame))
+        if (!_app.Config.CutoutFor(Title, Frame) || IPhoneDuo.IsDuo(Frame))
         {
             // Switched off (here or globally), or an iPhone Duo, whose app draws its own rail: take the overlays back out.
             if (config.InstalledCutout != null) RemoveCutout();
             return;
         }
 
-        bool iosBar = _app.Config.IosStatusBarFor(Title);
+        bool iosBar = _app.Config.IosStatusBarFor(Title, Frame);
         string signature = AndroidCutout.Signature(Frame, Display, _app.Config.StatusBarPaddingFactor, iosBar);
         if (signature == config.InstalledCutout || signature == _failedCutout) return;
 
@@ -785,7 +971,7 @@ internal sealed class EmulatorSession : IDisposable
                     Log.Write($"'{Title}': missing Android display tools: {string.Join(", ", missing)}");
                     _app.OfferAndroidTools();
                 };
-            var spec = AndroidCutout.Measure(frame, display2, factor);
+            var spec = AndroidCutout.Measure(frame, display2, factor, ios: iosBar);
             string? error = spec == null ? "frame and display orientation differ" : AndroidCutout.Apply(instance2, spec, sdk, iosBar);
             return () =>
             {
@@ -1195,6 +1381,7 @@ internal sealed class EmulatorSession : IDisposable
         {
             _overlay = new OverlayWindow(Main, _app.Config.BezelInteractive) { Companions = [_bar, _glass, _panel?.Window] };
             _overlay.MenuRequested += () => _app.ShowSessionMenu(this);
+            _overlay.DragEnded += () => { _reanchor = true; Sync(); };
             _overlay.DoubleClicked += () => { Peek = !Peek; Sync(); };
             _shown = null; // the caller puts the bitmap in
         }
@@ -1262,10 +1449,10 @@ internal sealed class EmulatorSession : IDisposable
     }
 
     /// <summary>
-    /// After a region change: MuMu places its picture 4 px off on every frame change of its window until the window
-    /// moves (<see cref="EmulatorClip.PlacePictureAgain"/>). The clip already moves it once straight away; frame changes
-    /// that come after ours (the theming layer's region, DWM) are caught by two more moves, 150 and 500 ms after the
-    /// last region change.
+    /// After a region change the compositor shows MuMu's picture 4 px off until the window moves
+    /// (<see cref="EmulatorClip.PlacePictureAgain"/>). The clip already moves it once straight away; frame changes that
+    /// come after ours (the theming layer's region, DWM) are caught by two more moves, 150 and 500 ms after the last
+    /// region change.
     /// </summary>
     private void PlacePictureSoon()
     {
@@ -1296,6 +1483,7 @@ internal sealed class EmulatorSession : IDisposable
         _laidOut = null;
         _overlay?.SetVisible(false);
         _glass?.SetVisible(false);
+        _chrome?.SetVisible(false);
         _panel?.Hide();
         _fade?.SetVisible(false);
         _bar?.SetVisible(false);
@@ -1335,6 +1523,9 @@ internal sealed class EmulatorSession : IDisposable
         _verifyTimer = null;
         _placeTimer?.Dispose();
         _placeTimer = null;
+        if (_anchorSave is { Enabled: true }) _app.Config.Save();
+        _anchorSave?.Dispose();
+        _anchorSave = null;
         _barTimer?.Dispose();
         _barTimer = null;
         if (_bar is { IsAlive: true }) _bar.DestroyHandle();
@@ -1343,6 +1534,15 @@ internal sealed class EmulatorSession : IDisposable
         _glass = null;
         _panel?.Dispose();
         _panel = null;
+        _chromeTimer?.Dispose();
+        _chromeTimer = null;
+        if (_chrome is { IsAlive: true }) _chrome.DestroyHandle();
+        _chrome = null;
+        if (_duoBarHidden && Instance is { } duoInstance)
+        {
+            _duoBarHidden = false;
+            try { AndroidStatusBar.Restore(duoInstance); } catch (Exception ex) { Log.Write($"'{Title}': status bar restore failed: {ex.Message}"); }
+        }
         _animation?.Dispose();
         _animation = null;
         _afterTimer?.Dispose();

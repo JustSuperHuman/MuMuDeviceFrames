@@ -5,7 +5,9 @@ using System.Runtime.InteropServices;
 namespace MuMuDeviceFrames;
 
 /// <summary>Where the status bar sits on the emulator's display, in the display's native pixels.</summary>
-internal sealed record StatusBarLayout(Size Screen, int StatusBarHeight, Rectangle? Cutout, int Inset)
+/// <param name="PointPx">Native pixels per iOS point; 0 takes the screen as an iPhone 17 Pro's 402 pt width.</param>
+/// <param name="Glyphs">Glyph size against an iPhone's (an iPad-like 24 pt bar has smaller ones).</param>
+internal sealed record StatusBarLayout(Size Screen, int StatusBarHeight, Rectangle? Cutout, int Inset, float PointPx = 0, float Glyphs = 1)
 {
     /// <summary>Time and icons centre on the island / notch when there is one, otherwise on the bar.</summary>
     public float CenterY => Cutout is { } c ? (c.Top + c.Bottom) / 2f : StatusBarHeight / 2f;
@@ -66,7 +68,8 @@ internal static class IosStatusBar
         using var brush = new SolidBrush(color);
         using var faint = new SolidBrush(Color.FromArgb(darkGlyphs ? 90 : 100, color));
 
-        float pt = layout.Screen.Width / 402f * scale;   // target px per iOS point (402 pt = iPhone 17 Pro width)
+        // Target px per iOS point (402 pt = iPhone 17 Pro width, unless the layout knows its density), times the glyph size.
+        float pt = (layout.PointPx > 0 ? layout.PointPx : layout.Screen.Width / 402f) * scale * layout.Glyphs;
         float cy = origin.Y + layout.CenterY * scale;
         float inset = layout.Inset * scale;
         float left = origin.X + inset, right = origin.X + layout.Screen.Width * scale - inset;

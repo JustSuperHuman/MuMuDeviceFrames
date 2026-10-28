@@ -69,20 +69,26 @@ internal static class EmulatorClip
     }
 
     /// <summary>
-    /// MuMu lays its picture out again whenever its window region changes, and gets it 4 px too far left (a gap at the
-    /// right, the left edge under the bezel) until the window next moves. That is what a drag used to fix. Every region
-    /// change here is followed by what the drag does: a 1 px move and straight back, which MuMu answers by placing the
-    /// picture right. Measured with PrintWindow: a frame change moves the picture from 78 to 74 px about 24 ms later, the
-    /// move puts it back to 78. More frame changes can follow ours (the theming layer answers a DWM change with a region
-    /// of its own), so the session repeats this a little later too (<see cref="EmulatorSession"/>).
+    /// After a change of MuMu's window region, the desktop compositor shows MuMu's picture 4 px too far left (a black
+    /// gap at the right, the left edge under the bezel) until the window next moves. That is what a drag used to fix.
+    /// So every region change is followed by a 1 px move and back, with a composited frame in between: an instant
+    /// move and back is merged into no move at all and fixes it only about one time in three. Measured on the desktop
+    /// (BitBlt): after a region change the band's inner edges sit at 74 / 694 px instead of 78 / 698, 3 times of 3;
+    /// after this, 78 / 698 every time. More frame changes can follow ours (the theming layer answers a DWM change
+    /// with a region of its own), so the session repeats this a little later too.
     /// </summary>
     public static void PlacePictureAgain(IntPtr hwnd)
     {
         if (!GetWindowRect(hwnd, out var r)) return;
         const uint flags = SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER;
         SetWindowPos(hwnd, IntPtr.Zero, r.Left + 1, r.Top, 0, 0, flags);
+        DwmFlush();
+        DwmFlush();
         SetWindowPos(hwnd, IntPtr.Zero, r.Left, r.Top, 0, 0, flags);
     }
+
+    [System.Runtime.InteropServices.DllImport("dwmapi.dll")]
+    private static extern int DwmFlush();
 
     private static void SetAttribute(IntPtr hwnd, int attribute, int value)
     {

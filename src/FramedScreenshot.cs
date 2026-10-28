@@ -14,11 +14,11 @@ internal static class FramedScreenshot
     public sealed record StatusBar(StatusBarLayout Layout, bool DarkGlyphs, string Time, FontFamily Font);
 
     /// <param name="background">"transparent" (default), "checker" or a #RRGGBB colour.</param>
-    public static string? Save(MuMuInstance instance, FrameInfo frame, string outPath, string? background = null, StatusBar? statusBar = null)
+    public static string? Save(MuMuInstance instance, FrameInfo frame, string outPath, string? background = null, StatusBar? statusBar = null, ChromeState? chrome = null)
     {
         var png = instance.Screencap();
         if (png == null) return "adb screencap failed";
-        using var image = Compose(frame, png, background, statusBar);
+        using var image = Compose(frame, png, background, statusBar, chrome);
         image.Save(outPath, ImageFormat.Png);
         return null;
     }
@@ -44,18 +44,18 @@ internal static class FramedScreenshot
     }
 
     /// <summary>The framed screenshot as PNG bytes (transparent around the phone); null with an error if the capture failed.</summary>
-    public static byte[]? Png(MuMuInstance instance, FrameInfo frame, StatusBar? statusBar, out string? error)
+    public static byte[]? Png(MuMuInstance instance, FrameInfo frame, StatusBar? statusBar, out string? error, ChromeState? chrome = null)
     {
         error = null;
         var png = instance.Screencap();
         if (png == null) { error = "adb screencap failed"; return null; }
-        using var image = Compose(frame, png, null, statusBar);
+        using var image = Compose(frame, png, null, statusBar, chrome);
         using var stream = new MemoryStream();
         image.Save(stream, ImageFormat.Png);
         return stream.ToArray();
     }
 
-    public static Bitmap Compose(FrameInfo frame, byte[] screenshotPng, string? background, StatusBar? statusBar = null)
+    public static Bitmap Compose(FrameInfo frame, byte[] screenshotPng, string? background, StatusBar? statusBar = null, ChromeState? chrome = null)
     {
         using var shot = new Bitmap(new MemoryStream(screenshotPng));
         // iPhone Duo: the screenshot's size says which display was on and which way round, so it always lands in the
@@ -134,6 +134,13 @@ internal static class FramedScreenshot
             float scale = (float)screen.Width / statusBar.Layout.Screen.Width;
             IosStatusBar.DrawInto(canvas, width, height, g =>
                 IosStatusBar.Draw(g, new PointF(screen.X, screen.Y), scale, statusBar.Layout, statusBar.DarkGlyphs, statusBar.Time, statusBar.Font));
+        }
+
+        // The rest of the iOS chrome (home indicator, the Duo's rail or status bar), at the screenshot's own scale.
+        if (chrome != null && (statusBar?.Font ?? IosStatusBar.Family(null)) is { } family)
+        {
+            float scale = (float)screen.Width / chrome.Screen.Width;
+            IosStatusBar.DrawInto(canvas, width, height, g => IosChrome.Draw(g, new PointF(screen.X, screen.Y), scale, chrome, family));
         }
 
         // Frame over the top (premultiplied source-over).

@@ -516,15 +516,17 @@ internal sealed class TrayApp : ApplicationContext
             else session.RemoveCutout();
         }));
 
-        bool iosOn = Config.IosStatusBarFor(session.Title);
+        bool iosOn = Config.IosStatusBarFor(session.Title, session.Frame);
+        bool iosDefault = Config.IosStatusBar || string.Equals(session.Frame?.Category, IPhoneDuo.Category, StringComparison.OrdinalIgnoreCase);
         var iosBar = Check("iOS-style status bar", iosOn, () =>
         {
-            // An explicit choice here overrides the global switch; matching the global value clears the override.
+            // An explicit choice here overrides the default (on for iPhone frames, else the global switch); choosing the
+            // default again clears the override.
             bool next = !iosOn;
-            instance.IosStatusBar = next == Config.IosStatusBar ? null : next;
+            instance.IosStatusBar = next == iosDefault ? null : next;
             Config.Save();
             session.Sync();
-        }, hint: instance.IosStatusBar == null ? "Following global" : "This emulator only");
+        }, hint: instance.IosStatusBar != null ? "This emulator only" : iosDefault && !Config.IosStatusBar ? "On for iPhone frames" : "Following global");
         iosBar.Enabled = connected;
         items.Add(iosBar);
 
@@ -766,9 +768,10 @@ internal sealed class TrayApp : ApplicationContext
         if (dialog.ShowDialog() != DialogResult.OK) return;
         string path = dialog.FileName;
         var bar = session.StatusBarForScreenshot() is { } s ? new FramedScreenshot.StatusBar(s.Layout, s.Dark, s.Time, IosStatusBar.Family(Config.StatusBarFont)) : null;
+        var chrome = session.ChromeForScreenshot();
         Task.Run(() =>
         {
-            var error = FramedScreenshot.Save(instance, frame, path, null, bar);
+            var error = FramedScreenshot.Save(instance, frame, path, null, bar, chrome);
             Post(() => Notify(error == null ? $"Saved {Path.GetFileName(path)}" : $"Screenshot failed: {error}", error != null));
         });
     }
@@ -778,11 +781,12 @@ internal sealed class TrayApp : ApplicationContext
         if (session.Instance is not { } instance || session.Frame is not { } frame) return;
         string title = session.Title;
         var bar = session.StatusBarForScreenshot() is { } s ? new FramedScreenshot.StatusBar(s.Layout, s.Dark, s.Time, IosStatusBar.Family(Config.StatusBarFont)) : null;
+        var chrome = session.ChromeForScreenshot();
         Task.Run(() =>
         {
             string? error;
             byte[]? png = null;
-            try { png = FramedScreenshot.Png(instance, frame, bar, out error); }
+            try { png = FramedScreenshot.Png(instance, frame, bar, out error, chrome); }
             catch (Exception ex) { error = ex.Message; }
             // The clipboard is only reachable from the UI (STA) thread.
             Post(() =>

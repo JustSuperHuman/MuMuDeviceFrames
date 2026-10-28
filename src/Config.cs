@@ -27,6 +27,10 @@ internal sealed class InstanceConfig
     /// <summary>iPhone Duo pose this emulator is kept in (healed after Android restarts). Null until it has one.</summary>
     [JsonConverter(typeof(JsonStringEnumConverter))]
     public DuoPose? DuoPose { get; set; }
+
+    /// <summary>Where the device lives on screen (its frame's centre, screen pixels): poses, turns and restarts keep it
+    /// there; only dragging the device moves it (see <see cref="DeviceAnchor"/>).</summary>
+    public AnchorPoint? Anchor { get; set; }
 }
 
 internal sealed class AppConfig
@@ -105,10 +109,14 @@ internal sealed class AppConfig
     public bool IosStatusBar { get; set; }
 
     /// <summary>Whether an emulator shows the iOS-style bar: its own override, else the global setting.</summary>
-    public bool IosStatusBarFor(string title) => Instance(title).IosStatusBar ?? IosStatusBar;
+    /// <remarks>An iPhone frame (the iPhone Duo too) brings the iOS chrome by default, as fit-to-frame brings the size;
+    /// the emulator's own choice still wins. Android frames keep Android's status bar unless switched on.</remarks>
+    public bool IosStatusBarFor(string title, FrameInfo? frame = null) =>
+        Instance(title).IosStatusBar ?? (IosStatusBar || string.Equals(frame?.Category, IPhoneDuo.Category, StringComparison.OrdinalIgnoreCase));
 
     /// <summary>Whether an emulator gets the cutout / status bar overlays (on its own, or because the iOS bar needs them).</summary>
-    public bool CutoutFor(string title) => Instance(title).MatchAndroidCutout || IosStatusBarFor(title);
+    public bool CutoutFor(string title, FrameInfo? frame = null) =>
+        Instance(title).MatchAndroidCutout || (IosStatusBarFor(title, frame) && !IPhoneDuo.IsDuo(frame));
 
     /// <summary>Time shown by the iOS-style status bar: "auto" (this PC's time, 12-hour), "24h", or fixed text such as "9:41".</summary>
     public string StatusBarClock { get; set; } = "auto";

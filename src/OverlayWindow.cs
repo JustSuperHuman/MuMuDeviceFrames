@@ -16,6 +16,12 @@ internal sealed class OverlayWindow : NativeWindow
 
     public event Action? MenuRequested;
     public event Action? DoubleClicked;
+
+    /// <summary>The user is dragging the device by its bezel (the emulator moves with it).</summary>
+    public bool IsDragging => _dragging;
+
+    /// <summary>A bezel drag just ended.</summary>
+    public event Action? DragEnded;
     public bool IsAlive => Handle != IntPtr.Zero;
     public bool IsVisible => _visible;
 
@@ -148,11 +154,20 @@ internal sealed class OverlayWindow : NativeWindow
                 return;
 
             case WM_LBUTTONUP:
-                if (_dragging) { _dragging = false; ReleaseCapture(); }
+                if (_dragging)
+                {
+                    _dragging = false;
+                    ReleaseCapture();
+                    DragEnded?.Invoke();
+                }
                 return;
 
             case WM_CAPTURECHANGED:
-                _dragging = false;
+                if (_dragging)
+                {
+                    _dragging = false;
+                    DragEnded?.Invoke();
+                }
                 break;
 
             case WM_LBUTTONDBLCLK:

@@ -16,10 +16,12 @@ internal static class AndroidCutout
 {
     public const string FrameworkOverlay = "com.justsuperhuman.deviceframes.cutout";
     public const string SystemUiOverlay = "com.justsuperhuman.deviceframes.systemui";
-    private const string Version = "v3";
+    // v5: iOS top safe areas, and no bottom cutout (v4's, taken back off: see Measure).
+    private const string Version = "v5";
 
     /// <summary>Cutout and corner measurements in the emulator's native pixels.</summary>
-    internal sealed record Spec(string? CutoutPath, string? CutoutRect, int StatusBarHeight, int CornerRadius, int SidePadding, Rectangle? Cutout)
+    /// <param name="Ios">The status bar height is iOS's safe area for that iPhone (written even without an island).</param>
+    internal sealed record Spec(string? CutoutPath, string? CutoutRect, int StatusBarHeight, int CornerRadius, int SidePadding, Rectangle? Cutout, bool Ios = false)
     {
         public bool HasCutout => CutoutPath != null;
     }
@@ -31,7 +33,8 @@ internal static class AndroidCutout
     /// Reads the geometry straight from the frame: whatever the frame paints *inside* the screen outline near the top is
     /// the cutout, and the rows it takes the screen to reach full width give the corner size.
     /// </summary>
-    public static Spec? Measure(FrameInfo frame, AndroidDisplay display, double paddingFactor)
+    /// <param name="ios">With the iOS-style chrome on an iPhone frame: the model's iOS safe areas (status bar, home indicator).</param>
+    public static Spec? Measure(FrameInfo frame, AndroidDisplay display, double paddingFactor, bool ios = false)
     {
         var source = FrameSource.Load(frame);
         var screen = source.Screen;
@@ -112,7 +115,17 @@ internal static class AndroidCutout
             statusBar = Math.Max(minStatusBar, (int)Math.Round((bottom + margin) * sy));
         }
 
-        return new Spec(path, rect, statusBar, (int)Math.Round(cornerExtent * 0.8), (int)Math.Round(cornerExtent * paddingFactor), cutout);
+        // Only the top: a bottom safe area given as a cutout makes Android letterbox every app that is not edge to edge
+        // (a black band under it), so the home indicator's inset has to come from a navigation bar instead.
+        bool iosSafe = false;
+        if (ios && DeviceSpecs.IosSafeArea(frame.Category, frame.Model) is { } safe)
+        {
+            iosSafe = true;
+            // iOS's own number: the status bar safe area of that iPhone.
+            int density = display.DensityOverride ?? display.Density;
+            statusBar = (int)Math.Round(safe.Top * density / 160.0);
+        }
+        return new Spec(path, rect, statusBar, (int)Math.Round(cornerExtent * 0.8), (int)Math.Round(cornerExtent * paddingFactor), cutout, iosSafe);
     }
 
     private static string Num(double value) => value.ToString("0.#", CultureInfo.InvariantCulture);
@@ -128,9 +141,10 @@ internal static class AndroidCutout
             framework.AppendLine($"    <string name=\"config_mainBuiltInDisplayCutoutRectApproximation\" translatable=\"false\">{spec.CutoutRect}</string>");
             // The frame already paints the island; Android must not paint a second one underneath.
             framework.AppendLine("    <bool name=\"config_fillMainBuiltInDisplayCutout\">false</bool>");
+        }
+        if (spec.HasCutout || spec.Ios)
             foreach (var name in new[] { "status_bar_height_default", "status_bar_height_portrait", "quick_qs_offset_height" })
                 framework.AppendLine($"    <dimen name=\"{name}\">{spec.StatusBarHeight}px</dimen>");
-        }
         foreach (var name in new[] { "rounded_corner_radius", "rounded_corner_radius_top", "rounded_corner_radius_bottom" })
             framework.AppendLine($"    <dimen name=\"{name}\">{spec.CornerRadius}px</dimen>");
 
@@ -147,6 +161,20 @@ internal static class AndroidCutout
 
         return InstallOverlay(instance, FrameworkOverlay, "android", "Device frame cutout", framework.ToString(), sdkRoot)
             ?? InstallOverlay(instance, SystemUiOverlay, "com.android.systemui", "Device frame status bar", systemUi.ToString(), sdkRoot);
+    }
+
+    /// <summary>
+    /// The iPhone Duo's part: Android's status bar emptied (no clock, no notification icons) so the tool's iOS chrome is
+    /// all there is, and no cutout or status-bar size of its own (the app reserves the rail itself).
+    /// </summary>
+    public static string? ApplyDuo(MuMuInstance instance, string? sdkRoot)
+    {
+        instance.Shell($"cmd overlay disable --user 0 {FrameworkOverlay}");
+        instance.Adb("uninstall", FrameworkOverlay);
+        const string values = "    <integer name=\"max_notif_static_icons\">0</integer>\n" +
+                              "    <dimen name=\"overflow_dot_radius\">0px</dimen>\n" +
+                              "    <dimen name=\"status_bar_clock_size\">0px</dimen>\n";
+        return InstallOverlay(instance, SystemUiOverlay, "com.android.systemui", "Device frame status bar", values, sdkRoot);
     }
 
     /// <summary>

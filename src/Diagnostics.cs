@@ -252,12 +252,24 @@ internal static class Diagnostics
             // With the iOS-style bar on, Android's own is empty; draw ours the way the overlay does. Never on the
             // iPhone Duo, whose app draws its own rail.
             FramedScreenshot.StatusBar? bar = null;
-            if (!IPhoneDuo.IsDuo(frame) && config.IosStatusBarFor(title) && display != null && AndroidStatusBar.IsHidden(instance)
-                && AndroidCutout.Measure(frame, display, config.StatusBarPaddingFactor) is { } spec)
+            if (!IPhoneDuo.IsDuo(frame) && config.IosStatusBarFor(title, frame) && display != null && AndroidStatusBar.IsHidden(instance)
+                && AndroidCutout.Measure(frame, display, config.StatusBarPaddingFactor, ios: true) is { } spec)
                 bar = new FramedScreenshot.StatusBar(StatusBarLayout.From(spec, display), AndroidStatusBar.WantsDarkGlyphs(instance),
                     IosStatusBar.ClockText(config.StatusBarClock), IosStatusBar.Family(config.StatusBarFont));
 
-            var error = FramedScreenshot.Save(instance, frame, outPath, background, bar);
+            // The rest of the iOS chrome, as the tray app draws it.
+            ChromeState? chrome = null;
+            if (display != null && config.IosStatusBarFor(title, frame))
+            {
+                bool duo = IPhoneDuo.IsDuo(frame);
+                var shownPose = IPhoneDuo.Detect(display);
+                bool home = IosChrome.HomeIndicator(frame) && (!duo || shownPose != null);
+                var kind = IosChrome.KindFor(frame, shownPose);
+                if (kind != ChromeKind.None || home)
+                    chrome = new ChromeState(kind, home, duo && shownPose is { } shown ? IPhoneDuo.ScreenSize(shown) : display.Native, display.DensityOverride ?? display.Density,
+                        AndroidStatusBar.WantsDarkGlyphs(instance), IosStatusBar.ClockText(config.StatusBarClock));
+            }
+            var error = FramedScreenshot.Save(instance, frame, outPath, background, bar, chrome);
             Log.Write(error == null ? $"Screenshot '{title}' in {frame.Key} -> {outPath}" : $"Screenshot '{title}' failed: {error}");
             return error == null ? 0 : 1;
         }

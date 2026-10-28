@@ -95,6 +95,30 @@ internal static class DeviceSpecs
         return new DeviceSpec(hole, density, false);
     }
 
+    /// <summary>
+    /// iOS's safe area on each iPhone, in points: the status bar at the top (Dynamic Island, notch or classic bar) and
+    /// the home indicator at the bottom (none on Touch ID phones). Apps on the emulator get the same insets.
+    /// </summary>
+    private static readonly (string[] Models, int Top, int Bottom)[] SafeAreas =
+    [
+        (["6s", "8", "SE", "8 Plus"], 20, 0),
+        (["X", "XS", "11 Pro", "11 Pro Max"], 44, 34),
+        (["XR", "11"], 48, 34),
+        (["12 mini", "13 mini"], 50, 34),
+        (["12", "12 Pro", "12 Pro Max", "13", "13 Pro", "13 Pro Max", "14", "14 Plus"], 47, 34),
+        (["14 Pro", "14 Pro Max", "15", "15 Plus", "15 Pro", "15 Pro Max", "16", "16 Plus"], 59, 34),
+        (["16 Pro", "16 Pro Max", "17", "17 Pro", "17 Pro Max", "Air"], 62, 34),
+    ];
+
+    /// <summary>The iPhone's safe area (top, bottom) in points; null for anything that is not a known iPhone.</summary>
+    public static (int Top, int Bottom)? IosSafeArea(string category, string model)
+    {
+        if (!string.Equals(category, "Apple iPhone", StringComparison.OrdinalIgnoreCase)) return null;
+        foreach (var row in SafeAreas)
+            if (row.Models.Contains(model, StringComparer.OrdinalIgnoreCase)) return (row.Top, row.Bottom);
+        return null;
+    }
+
     /// <summary>True when an emulator with this panel and density already is the device (MuMu reports either orientation).</summary>
     public static bool Matches(DeviceSpec spec, Size physical, int density) =>
         (physical == spec.Native || physical == new Size(spec.Native.Height, spec.Native.Width)) && density == spec.Density;

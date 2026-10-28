@@ -203,3 +203,25 @@ var fitted = (System.Drawing.Rectangle)Call("WindowFit", "Fit", new System.Drawi
 Check(fitted.Width == 769 + 8 && fitted.Height == 1009 + 43 && Math.Abs(fitted.X + fitted.Width / 2 - (100 + 1017 / 2)) <= 1
       && Math.Abs(fitted.Y + fitted.Height / 2 - (300 + 812 / 2)) <= 1,
     $"Letterboxed window refitted round its centre at the same scale ({fitted})");
+
+// The device keeps its centre through pose and size changes, but never hangs off its monitor or under the taskbar.
+var anchorWork = new System.Drawing.Rectangle(0, 0, 2560, 1400);
+var anchorPlaced = (System.Drawing.Rectangle)Call("DeviceAnchor", "Place", new System.Drawing.Size(605, 833), new System.Drawing.Point(1200, 700), anchorWork)!;
+Check(anchorPlaced.X + anchorPlaced.Width / 2 == 1200 && anchorPlaced.Y + anchorPlaced.Height / 2 == 700, "A closed Duo is centred on its anchor");
+var anchorOpened = (System.Drawing.Rectangle)Call("DeviceAnchor", "Place", new System.Drawing.Size(1073, 775), new System.Drawing.Point(2300, 700), anchorWork)!;
+Check(anchorOpened.Right == 2560 && anchorOpened.Y + anchorOpened.Height / 2 == 700, "Opening near the right edge moves only as far as it takes to stay on the work area");
+var anchorHuge = (System.Drawing.Rectangle)Call("DeviceAnchor", "Place", new System.Drawing.Size(1200, 1600), new System.Drawing.Point(1200, 700), anchorWork)!;
+Check(anchorHuge.Top == 0, "A device taller than the work area keeps its top on it");
+
+// iOS's top safe area per iPhone, which Android's status bar height is set to: Dynamic Island phones differ by model.
+var safeArea = (System.Runtime.CompilerServices.ITuple)Call("DeviceSpecs", "IosSafeArea", "Apple iPhone", "17 Pro")!;
+Check((int)safeArea[0]! == 62 && (int)((System.Runtime.CompilerServices.ITuple)Call("DeviceSpecs", "IosSafeArea", "Apple iPhone", "15")!)[0]! == 59
+      && (int)((System.Runtime.CompilerServices.ITuple)Call("DeviceSpecs", "IosSafeArea", "Apple iPhone", "SE")!)[0]! == 20,
+    "iOS status bar safe areas: 62 pt on the 17 Pro, 59 on the 15, 20 on Touch ID phones");
+Check(Call("DeviceSpecs", "IosSafeArea", "Android Phone", "Pixel 8") == null, "Android frames get no iOS safe area");
+
+// The Duo's upright bar: its items start where the 44 pt screen corner can no longer cut them (6 pt down, where the
+// glyphs begin, the arc is 44 - sqrt(44^2 - 38^2) = 21.8 pt in).
+var duoBar = Call("IosChrome", "DuoBarLayout", new System.Drawing.Size(1878, 2670), 480)!;
+int duoInset = (int)duoBar.GetType().GetProperty("Inset")!.GetValue(duoBar)!;
+Check(duoInset / 3.0 >= 44 - Math.Sqrt(44 * 44 - 38 * 38) + 4, $"Duo status bar items clear the screen corner ({duoInset / 3.0} pt in)");
