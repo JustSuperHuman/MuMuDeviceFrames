@@ -83,7 +83,8 @@ internal static class EmulatorClip
     /// </summary>
     public static void PlacePictureAgain(IntPtr hwnd)
     {
-        if (!GetWindowRect(hwnd, out var r)) return;
+        // Moving a minimised window moves the place it is restored to.
+        if (IsIconic(hwnd) || !GetWindowRect(hwnd, out var r) || r.Left <= -30000) return;
         const uint flags = SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER;
         SetWindowPos(hwnd, IntPtr.Zero, r.Left + 1, r.Top, 0, 0, flags);
         DwmFlush();

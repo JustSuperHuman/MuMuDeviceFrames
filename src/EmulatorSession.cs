@@ -124,6 +124,11 @@ internal sealed class EmulatorSession : IDisposable
             Sync();
             return;
         }
+        if (evt == EVENT_SYSTEM_MINIMIZEEND)
+        {
+            _anchorMoves = 0; // restored: put the device back on its anchor however it came back
+            StartVerifyBurst(20);
+        }
         if (evt is EVENT_OBJECT_LOCATIONCHANGE or EVENT_OBJECT_SHOW or EVENT_OBJECT_HIDE or EVENT_OBJECT_DESTROY
             or EVENT_SYSTEM_MINIMIZESTART or EVENT_SYSTEM_MINIMIZEEND)
             Sync();
@@ -158,6 +163,9 @@ internal sealed class EmulatorSession : IDisposable
             Suspend();
             return;
         }
+        // Minimised, or on its way there or back: Windows parks the window at -32000. Nothing is laid out from that
+        // (moving it to the anchor from there put its restored place 35000 px off screen).
+        if (wr.Left <= -30000 || wr.Top <= -30000 || rr.Left <= -30000 || rr.Top <= -30000) return;
 
         if (FitMuMuWindow(wr, rr)) return; // MuMu's window is being resized to its picture; Sync runs again on the move
 
@@ -468,6 +476,9 @@ internal sealed class EmulatorSession : IDisposable
             return false;
         }
         // A window that will not go where it is put (MuMu clamping it, say) gets a few tries, then is left be.
+        // A window off every screen (however it got there) always gets put back; one that is on screen but will not
+        // stay where it is put (MuMu clamping it, say) gets a few tries, then is left be.
+        if (!SystemInformation.VirtualScreen.IntersectsWith(Rectangle.FromLTRB(wr.Left, wr.Top, wr.Right, wr.Bottom))) _anchorMoves = 0;
         if (++_anchorMoves > 3)
         {
             if (_anchorMoves == 4) Log.Write($"'{Title}': MuMu's window does not stay at the device's place ({dx}, {dy} px off); leaving it");
@@ -503,16 +514,34 @@ internal sealed class EmulatorSession : IDisposable
     /// </summary>
     public void Watch()
     {
+        // Right after a switch: MuMu's window not turned with Android by now is turned (see StartPoseSwitch).
+        if (_followBy is { } follow && DateTime.UtcNow >= follow.At && !_disposed && !IsGone)
+        {
+            _followBy = null;
+            // Also while the animation plays: it is waiting for MuMu's window to turn (the emulator is hidden under it).
+            if (!Peek && GetWindowRect(Render, out var renderNow) && renderNow.Width < renderNow.Height != follow.Upright)
+                TurnMuMuWindow($"MuMu did not turn its window {(follow.Upright ? "upright" : "landscape")} with Android");
+        }
+        // The iPhone Duo's watchdog runs on this clock too: Android's side once a second (KeepPose), even when nothing
+        // on the desktop has moved (a script turning Android, MuMu keeping its window the wrong way round).
+        if (!_disposed && IsDuoSurface && Instance != null && Display != null && !_androidBusy && _animation == null
+            && DateTime.UtcNow >= _nextPosePoll && !IsGone && !IsIconic(Main)) PollPose();
         // Minimised or hidden: Windows hides the owned frame windows itself, and Sync leaves that alone.
         if (_disposed || _laidOut is not { } laid || _animation != null || IsGone || IsIconic(Main) || !IsWindowVisible(Main)) return;
         bool moved = !GetWindowRect(Main, out var wr) || !GetWindowRect(Render, out var rr) || !Same(wr, laid.Window) || !Same(rr, laid.Render);
         bool lost = _overlay is { IsAlive: true } overlay && !overlay.IsAsSet();
-        if (!moved && !lost) return;
+        // The clip region taken away (by MuMu, the theming layer or anyone): Sync puts it back. Peek has no region on
+        // purpose, so it never counts as lost.
+        bool clipLost = !Peek && _region is { } region && !EmulatorClip.IsIntact(Main, region.Box);
+        if (clipLost && !_clipLostLogged) Log.Write($"'{Title}': clip region was taken away; putting it back");
+        _clipLostLogged = clipLost; // once per time it goes
+        if (!moved && !lost && !clipLost) return;
         if (lost)
         {
-            Log.Write($"'{Title}': frame window was not where it was put; putting it back");
+            if (!_frameLostLogged) Log.Write($"'{Title}': frame window was not where it was put; putting it back");
             _overlay!.Reassert();
         }
+        _frameLostLogged = lost;
         Sync();
     }
 
@@ -754,7 +783,7 @@ internal sealed class EmulatorSession : IDisposable
         {
             try
             {
-                _panel = new DuoPosePanel(Main, _app.PoseHotkey, pose => SetDuoPose(pose));
+                _panel = new DuoPosePanel(Main, _app.PoseHotkey, pose => SetDuoPose(pose, "the pose panel"));
                 UpdateCompanions();
             }
             catch (Exception ex)
@@ -1044,18 +1073,6 @@ internal sealed class EmulatorSession : IDisposable
                 StartPoseSwitch(framePose);
                 return;
             }
-            // After an Android restart MuMu turns the display back and the device state override is gone; MuMu can turn
-            // the display when an app it remembers comes to the front; and two writers (this app and a script, say) can
-            // interleave. Put the pose back: a few tries, a few seconds apart, until it holds.
-            if (Pose != null && config.DuoPose is { } target && (Pose != target || !IPhoneDuo.InStep(target, Display))
-                && _resyncAttempts < 5 && DateTime.UtcNow >= _nextResync)
-            {
-                _resyncAttempts++;
-                _nextResync = DateTime.UtcNow.AddSeconds(3);
-                Log.Write($"'{Title}': iPhone Duo out of step with {target} (shows {Pose}, sees {Display.Duo?.Current}, state {Display.Duo?.FoldState}); applying {target} again");
-                StartPoseSwitch(target);
-                return;
-            }
             // A foldable without the postures overlay reports device states but no FoldingFeature: install it (once).
             if (Display.Duo is { Foldable: true, Postures: false } && !_posturesTried)
             {
@@ -1063,7 +1080,7 @@ internal sealed class EmulatorSession : IDisposable
                 InstallPostures();
                 return;
             }
-            // Keep up with poses switched from outside this app (adb, scripts): a cheap wm size every few seconds.
+            // The watchdog: Android's state, MuMu's window and the safe areas, every second (KeepPose).
             if (DateTime.UtcNow >= _nextPosePoll)
             {
                 PollPose();
@@ -1205,8 +1222,10 @@ internal sealed class EmulatorSession : IDisposable
     // ---- iPhone Duo: fold and unfold ----------------------------------------------------------------------------
 
     /// <summary>Folds or unfolds the iPhone Duo. False (after telling the user why) when this emulator cannot.</summary>
-    public bool SetDuoPose(DuoPose pose)
+    /// <param name="source">Who asked (the pose panel, the menu, a hotkey, the command line), for the log.</param>
+    public bool SetDuoPose(DuoPose pose, string source)
     {
+        Log.Write($"'{Title}': {IPhoneDuo.Variant(pose)} asked for by {source}");
         if (Display != null && !IsDuoSurface)
         {
             NotDuo();
@@ -1220,10 +1239,10 @@ internal sealed class EmulatorSession : IDisposable
     }
 
     /// <summary>Fold or unfold (half open closes).</summary>
-    public bool ToggleDuoPose() => SetDuoPose(IPhoneDuo.Toggle(Pose));
+    public bool ToggleDuoPose(string source) => SetDuoPose(IPhoneDuo.Toggle(Pose), source);
 
     /// <summary>Half open like a book, or back to flat open.</summary>
-    public bool ToggleDuoHalf() => SetDuoPose(IPhoneDuo.ToggleHalf(Pose));
+    public bool ToggleDuoHalf(string source) => SetDuoPose(IPhoneDuo.ToggleHalf(Pose), source);
 
     /// <summary>Android reports device states (made a foldable), so apps get a FoldingFeature.</summary>
     public bool IsFoldable => Display?.Duo?.Foldable == true;
@@ -1302,7 +1321,7 @@ internal sealed class EmulatorSession : IDisposable
     /// Runs the <c>wm</c> commands for a pose. The new frame is rendered first, so it goes up as soon as Android has
     /// switched (the picture changes size at that moment and the old clip would show the wrong part of it).
     /// </summary>
-    private void StartPoseSwitch(DuoPose pose)
+    private void StartPoseSwitch(DuoPose pose, bool refreshSafeAreas = false)
     {
         var (instance, display) = (Instance!, Display!);
         var frame = _app.Library.Find(IPhoneDuo.FrameKey(pose));
@@ -1311,10 +1330,12 @@ internal sealed class EmulatorSession : IDisposable
         RenderKey? key = frame != null && IPhoneDuo.PictureInRender(pose, turned) is { } picture
             ? new RenderKey(frame.Key, picture.Width, picture.Height, Math.Clamp(_app.Config.Overlap, 0, 8))
             : null;
-        _nextPosePoll = DateTime.UtcNow.AddSeconds(4);
+        _nextPosePoll = DateTime.UtcNow.AddSeconds(1);
         // Only a switch between safe-area sets (the rail poses, the upright ones, tent) needs the display off and on
-        // (apps pause and resume around it, and some take a moment to redraw).
-        bool refresh = _app.Config.Instance(Title).DuoOverlay != null && (Pose is not { } before || IPhoneDuo.SafeAreaGroup(before) != IPhoneDuo.SafeAreaGroup(pose));
+        // (apps pause and resume around it, and some take a moment to redraw), or a device turned outside the app,
+        // where Android rotated without reading its safe areas again.
+        bool refresh = _app.Config.Instance(Title).DuoOverlay != null
+            && (refreshSafeAreas || Pose is not { } before || IPhoneDuo.SafeAreaGroup(before) != IPhoneDuo.SafeAreaGroup(pose));
         // Tent's rail lies on the panel edge that rotation 90 shows on top, and SystemUI sizes the status bar at the
         // rotation change, before the refresh: turning 270 and back after it makes SystemUI size it again.
         bool resizeStatusBar = refresh && Pose == DuoPose.Tent && IPhoneDuo.RotationFor(pose, display.Native.Width < display.Native.Height) == 1;
@@ -1337,6 +1358,14 @@ internal sealed class EmulatorSession : IDisposable
                     _app.Notify($"{Title}: could not {(pose == DuoPose.Folded ? "fold" : "unfold")} the iPhone Duo. {output.Trim()}".TrimEnd(), warning: true);
                 SetPose(reached);
                 if (reached is { } got && IPhoneDuo.InStep(got, Display)) _resyncAttempts = 0;
+                // What the watchdog compares with next: Android in this pose; MuMu's window unknown until it is seen
+                // the right way round (it may not follow, for its launcher).
+                _seenPose = reached;
+                _seenUpright = null;
+                _nextPosePoll = DateTime.UtcNow.AddSeconds(1);
+                // MuMu turns its window within half a second when it follows; when it does not (its home screen in
+                // front), turn it then, without waiting for the next look at Android.
+                if (reached is { } arrived) _followBy = (DateTime.UtcNow.AddSeconds(0.6), IPhoneDuo.TurnsWindow(arrived));
                 if (rendered != null && reached == pose)
                 {
                     _pending = null;
@@ -1365,25 +1394,188 @@ internal sealed class EmulatorSession : IDisposable
 
     private void PollPose()
     {
-        _nextPosePoll = DateTime.UtcNow.AddSeconds(4);
+        _nextPosePoll = DateTime.UtcNow + PoseCheck;
         var instance = Instance!;
         RunAndroidTask(() =>
         {
             var display = MuMuControl.QueryDisplay(instance);
-            return () =>
-            {
-                if (display == null) return;
-                Display = display;
-                var pose = IPhoneDuo.Detect(display);
-                if (pose is { } now && now == _app.Config.Instance(Title).DuoPose && IPhoneDuo.InStep(now, display)) _resyncAttempts = 0;
-                if (pose == Pose) return;
-                bool regroup = Pose is not { } was || pose is not { } now2 || IPhoneDuo.SafeAreaGroup(was) != IPhoneDuo.SafeAreaGroup(now2);
-                SetPose(pose);
-                AdoptPose();
-                if (regroup && _app.Config.Instance(Title).DuoOverlay != null) RunAndroidTask(() => { instance.Shell(IPhoneDuo.RefreshSafeAreas); return () => { }; });
-                Sync();
-            };
+            return () => KeepPose(display);
         });
+    }
+
+    // ---- iPhone Duo: the watchdog -------------------------------------------------------------------------------
+
+    /// <summary>How often Android's side is looked at (also straight away when MuMu's window turns).</summary>
+    private static readonly TimeSpan PoseCheck = TimeSpan.FromSeconds(1);
+
+    private DuoPose? _seenPose;      // Android's pose at the last look where it and MuMu's window agreed
+    private bool? _seenUpright;      // MuMu's window then
+    private string? _seenFocus;      // the app in front at the last look
+    private double _seenUptime;
+    private DateTime _focusChangedAt, _lastWindowTurn, _lastSafeAreaRefresh;
+    private DateTime? _disagreeSince;
+    private (DateTime At, bool Upright)? _followBy;
+    private bool _clipLostLogged, _frameLostLogged;
+
+    /// <summary>
+    /// Compares what is with what the pose wants and repairs the difference, every second. Android's state is read in
+    /// one adb call (display size and rotation, device state, fold line, safe areas, the app in front, uptime), MuMu's
+    /// window from its render size.
+    ///
+    /// A change made outside the app is a pose change when it is coherent, Android and MuMu's window agreeing: turned
+    /// by Android (a script's <c>wm user-rotation</c>, <c>wm size</c> or device state), or MuMu's window turned by
+    /// itself with the same app in front (MuMu's rotate button), which turns the device a quarter. Incoherent states are
+    /// repaired: MuMu's window not following Android (its home screen, an app it remembers) is turned with MuMu's own
+    /// rotate; Android in no pose, or drifted from it (rotation, device state, fold line, stale safe areas), gets the
+    /// pose again. Right after attaching or an Android restart there is nothing seen to compare with, so the kept pose
+    /// is put back (MuMu turns the display back after a restart) unless the display is the other one altogether.
+    /// </summary>
+    private void KeepPose(AndroidDisplay? display)
+    {
+        var now = DateTime.UtcNow;
+        if (display?.Duo is not { Current: not null } duo)
+        {
+            Forget(); // Android is starting (or adb is not answering): nothing to judge yet
+            return;
+        }
+        Display = display;
+        if (duo.Uptime is { } uptime)
+        {
+            if (uptime + 5 < _seenUptime)
+            {
+                Log.Write($"'{Title}': Android restarted; putting the iPhone Duo back");
+                Forget();
+                _gesturesChecked = false; // MuMu switches the gestures off at every boot
+            }
+            _seenUptime = uptime;
+        }
+        if (duo.Focus != _seenFocus)
+        {
+            if (_seenFocus != null) _focusChangedAt = now;
+            _seenFocus = duo.Focus;
+        }
+        if (Peek || _animation != null) return; // hands off while the user peeks at MuMu's own window, or a switch plays
+
+        var config = _app.Config.Instance(Title);
+        var kept = config.DuoPose;
+        var android = IPhoneDuo.Detect(display);
+        bool upright = RenderSize.Width < RenderSize.Height;
+        if (android is not { } shown)
+        {
+            if (kept is { } want) Reassert(want, $"Android shows no pose ({duo.Current?.Width}x{duo.Current?.Height})");
+            return;
+        }
+        if (Pose != shown && !_androidBusy) SetPose(shown); // the frame follows what Android shows
+
+        if (IPhoneDuo.TurnsWindow(shown) != upright)
+        {
+            // Android and MuMu's window disagree about the way round.
+            bool androidTurned = _seenPose is { } before && before != shown;
+            bool windowTurned = !androidTurned && _seenUpright is { } wasUpright && wasUpright != upright;
+            if (windowTurned && now - _focusChangedAt > TimeSpan.FromSeconds(2))
+            {
+                Adopt(IPhoneDuo.Turned(shown), "MuMu's window was turned");
+                return;
+            }
+            // MuMu did not follow Android (its home screen, or an app it remembers the other way round): turn it.
+            _disagreeSince ??= now;
+            if (now - _disagreeSince >= TimeSpan.FromSeconds(0.8))
+                TurnMuMuWindow($"MuMu kept its window {(upright ? "upright" : "landscape")} for {shown} ({duo.Focus ?? "?"} in front)");
+            if (androidTurned && kept is { } wanted && wanted != shown && IPhoneDuo.IsInner(shown) == IPhoneDuo.IsInner(wanted))
+            {
+                // Android itself was turned (a script's wm user-rotation): that is the new pose. MuMu's window is turned
+                // too if it has not followed by the time the switch is under way.
+                Adopt(shown, "Android was turned");
+                _followBy = (DateTime.UtcNow.AddSeconds(0.6), IPhoneDuo.TurnsWindow(shown));
+            }
+            return;
+        }
+        _disagreeSince = null;
+
+        if (kept is not { } target)
+        {
+            Adopt(shown, "first pose seen");
+            return;
+        }
+        if (shown != target)
+        {
+            // Seen in the kept pose during this session: it was turned just now, outside the app. With nothing seen
+            // yet (attached, Android restarted) only a change of display counts; a turn is MuMu's own doing.
+            if (_seenPose == target || IPhoneDuo.IsInner(shown) != IPhoneDuo.IsInner(target)) Adopt(shown, "changed outside the app");
+            else Reassert(target, $"came back as {shown}");
+            return;
+        }
+        _seenPose = shown;
+        _seenUpright = upright;
+        if (!IPhoneDuo.InStep(target, display))
+        {
+            Reassert(target, $"out of step (rotation {duo.Rotation}, device state {duo.FoldState}, fold line {duo.Features})");
+            return;
+        }
+        _resyncAttempts = 0;
+        // The safe areas apps get: stale when Android turned without reading them again. The display off and on.
+        if (config.DuoOverlay != null && duo.Cutout is { } cutout && DuoSafeAreas.For(display.Density, display.Native) is { } areas
+            && cutout != areas.Insets(target) && now - _lastSafeAreaRefresh > TimeSpan.FromSeconds(5) && Instance is { } inst)
+        {
+            _lastSafeAreaRefresh = now;
+            Log.Write($"'{Title}': safe areas {cutout} are not {target}'s {areas.Insets(target)}; reading them again");
+            RunAndroidTask(() => { inst.Shell(IPhoneDuo.RefreshSafeAreas); return () => _nextPosePoll = DateTime.MinValue; });
+        }
+    }
+
+    /// <summary>MuMu's own rotate, for its window only (Android stays as it is); at most every two seconds.</summary>
+    private void TurnMuMuWindow(string why)
+    {
+        var now = DateTime.UtcNow;
+        if (now - _lastWindowTurn < TimeSpan.FromSeconds(2) || Instance is not { } instance) return;
+        _lastWindowTurn = now;
+        string title = Title;
+        Log.Write($"'{title}': {why}; turning it");
+        // MuMuManager, not adb: alongside a pose switch that may be running, so the window turns while Android does.
+        Task.Run(() =>
+        {
+            string? error;
+            try { error = MuMuControl.TurnWindow(instance); }
+            catch (Exception ex) { error = ex.Message; }
+            _app.Post(() =>
+            {
+                if (_disposed) return;
+                if (error != null) Log.Write($"'{title}': MuMu's rotate failed: {error}");
+                _disagreeSince = null;
+                StartVerifyBurst(40);
+            });
+        });
+    }
+
+    /// <summary>Nothing seen to compare with (attached, Android restarting).</summary>
+    private void Forget()
+    {
+        _seenPose = null;
+        _seenUpright = null;
+        _disagreeSince = null;
+    }
+
+    /// <summary>A pose reached from outside becomes the one kept, and gets everything it needs (fold line, safe areas).</summary>
+    private void Adopt(DuoPose pose, string why)
+    {
+        var config = _app.Config.Instance(Title);
+        Log.Write($"'{Title}': iPhone Duo {config.DuoPose?.ToString() ?? "no pose"} -> {pose} ({why})");
+        config.DuoPose = pose;
+        _app.Config.Save();
+        _resyncAttempts = 0;
+        _seenPose = pose;
+        _seenUpright = IPhoneDuo.TurnsWindow(pose);
+        StartPoseSwitch(pose, refreshSafeAreas: true);
+    }
+
+    /// <summary>Puts the kept pose back: right away, then a few more tries two seconds apart until it holds.</summary>
+    private void Reassert(DuoPose pose, string why)
+    {
+        if (_resyncAttempts >= 5 || DateTime.UtcNow < _nextResync) return;
+        _resyncAttempts++;
+        _nextResync = DateTime.UtcNow.AddSeconds(2);
+        Log.Write($"'{Title}': iPhone Duo {why}; applying {pose} again");
+        StartPoseSwitch(pose, refreshSafeAreas: true);
     }
 
     /// <summary>

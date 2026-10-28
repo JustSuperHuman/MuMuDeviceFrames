@@ -15,6 +15,9 @@ internal sealed record DuoSafeAreas(int Rail, int UprightTop, int Home, bool Tur
         return new DuoSafeAreas(Px(IosChrome.RailPt), Px(IosChrome.UprightTopPt), Px(IosChrome.HomeIndicatorPt), physical.Width < physical.Height);
     }
 
+    /// <summary>The safe areas apps get in a pose, as Android reports the cutout (display orientation, pixels).</summary>
+    public (int Left, int Top, int Right, int Bottom) Insets(DuoPose pose) => IPhoneDuo.IsUpright(pose) ? (0, 0, 0, Home) : (0, 0, Rail, Home);
+
     /// <summary>Tent's waterfall: the rail on the right and the home indicator at the bottom, at tent's rotation.</summary>
     public (int Left, int Top, int Right, int Bottom) TentNatural =>
         IPhoneDuo.ToPanel((0, 0, Rail, Home), IPhoneDuo.RotationFor(DuoPose.Tent, Turned));

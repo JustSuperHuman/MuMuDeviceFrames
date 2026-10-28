@@ -88,9 +88,14 @@ unins000.exe /VERYSILENT [/REMOVESETTINGS=1] [/REMOVEOVERLAYS=1]
 | `Ctrl+Alt+F` | All frames off / on (off = emulators look exactly like stock MuMu) |
 | `Ctrl+Alt+R` | Reload the Expo app in the active or last active emulator |
 | `Ctrl+Alt+G` | Show or hide Expo's floating gear in that emulator |
-| `Ctrl+Alt+D` | Fold or unfold the iPhone Duo in that emulator (see [iPhone Duo](iphone-duo.md)) |
+| `Ctrl+Alt+D` | Fold or unfold the iPhone Duo in front (see [iPhone Duo](iphone-duo.md)) |
 | `Ctrl+Alt+B` | Half open that iPhone Duo like a book, or back to flat |
+| `Ctrl+Alt+1` to `Ctrl+Alt+6` | That iPhone Duo's poses: Closed, Open, Book, Open portrait, Tabletop, Tent |
 | Tray icon | Same menus for every emulator, default frame, frame download, Start with Windows, exit |
+
+The iPhone Duo hotkeys (`Ctrl+Alt+D`, `Ctrl+Alt+B`, `Ctrl+Alt+1` to `Ctrl+Alt+6`) only act while an emulator is the
+foreground window; anywhere else the keys reach the app in front, so typing (or AltGr, which sends Ctrl+Alt on many
+keyboards) never switches a pose. `Ctrl+Alt+F` and the Expo hotkeys work from anywhere.
 
 The Expo actions are also in each emulator's bezel and tray menus. They work when an Expo development app is in front
 inside that emulator. With several emulators open, click the one you want before using a hotkey. External hotkey tools
@@ -186,9 +191,9 @@ and the Android-matching switch are stored per emulator name. `log.txt` is next 
 | `Hotkey` | `Ctrl+Alt+F` | |
 | `ExpoReloadHotkey` | `Ctrl+Alt+R` | Reload the Expo app in the active or last active emulator; empty string disables it. |
 | `ExpoGearHotkey` | `Ctrl+Alt+G` | Show or hide Expo's floating gear there; empty string disables it. |
-| `DuoHotkey` | `Ctrl+Alt+D` | Fold or unfold the iPhone Duo in the active or last active emulator; empty string disables it. |
-| `DuoHalfHotkey` | `Ctrl+Alt+B` | Half open that iPhone Duo, or back to flat; empty string disables it. |
-| `DuoPoseHotkeys` | `Ctrl+Alt` | Modifiers for the six pose hotkeys, then 1 to 6; empty string disables them. |
+| `DuoHotkey` | `Ctrl+Alt+D` | Fold or unfold the iPhone Duo in front (only while an emulator is the foreground window); empty string disables it. |
+| `DuoHalfHotkey` | `Ctrl+Alt+B` | Half open that iPhone Duo, or back to flat (same); empty string disables it. |
+| `DuoPoseHotkeys` | `Ctrl+Alt` | Modifiers for the six pose hotkeys, then 1 to 6 (same); empty string disables them. |
 | `DuoPoseControls` | `true` | The pose buttons beside an iPhone Duo |
 | `LastActiveEmulator` | `null` | Last emulator used for Expo hotkeys when another app is in front. Updated automatically. |
 | `RecordingPadding` | `15` | Pixels to capture around every side of the full frame, from 0 to 500. |

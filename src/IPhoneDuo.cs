@@ -13,7 +13,13 @@ internal enum DuoPose { Folded, Open, HalfOpen, OpenPortrait, Tabletop, Tent }
 /// What a Duo emulator's Android reports beyond <c>wm size</c>: the size apps see now (rotation included), and, once it
 /// has been made a foldable, its device state (0 closed, 1 half open, 2 open) and whether the postures overlay is on.
 /// </summary>
-internal sealed record DuoDevice(Size? Current, bool Foldable, int? FoldState, bool Postures);
+/// <param name="Rotation">Android's pinned rotation (<c>user_rotation</c>).</param>
+/// <param name="Features"><c>display_features</c>, "null" when there is no fold line.</param>
+/// <param name="Cutout">The display cutout's insets in the display's own orientation: the safe areas apps get.</param>
+/// <param name="Focus">The package of the window in front.</param>
+/// <param name="Uptime">Seconds since Android started; a smaller number than before means it restarted.</param>
+internal sealed record DuoDevice(Size? Current, bool Foldable, int? FoldState, bool Postures, int? Rotation = null, string? Features = null,
+    (int Left, int Top, int Right, int Bottom)? Cutout = null, string? Focus = null, double? Uptime = null);
 
 /// <summary>
 /// iPhone Duo on a MuMu emulator. The emulator runs at the bounding box of both displays (2670 × 2034 at 480 dpi) and
@@ -180,7 +186,25 @@ internal static class IPhoneDuo
     /// the pose's device state (a restart clears the state override). False means the pose commands should run again.
     /// </summary>
     public static bool InStep(DuoPose pose, AndroidDisplay? display) =>
-        display?.Duo is { } duo && duo.Current == ScreenSize(pose) && (!duo.Foldable || duo.FoldState == StateFor(pose));
+        display?.Duo is { } duo && duo.Current == ScreenSize(pose) && (!duo.Foldable || duo.FoldState == StateFor(pose))
+        // The pinned rotation itself (a landscape display at 270 looks the same as at 90, but its safe areas do not).
+        && (duo.Rotation is not { } rotation || rotation == RotationFor(pose, display.Native.Width < display.Native.Height))
+        // The fold line, on a foldable: there for the inner display, gone for the outer one.
+        && (!duo.Foldable || duo.Features is not { } features || features == (IsInner(pose) ? FoldFeature(display.Native) : "null"));
+
+    /// <summary>
+    /// The pose the device is in once it is turned a quarter: the inner display between landscape and portrait (open
+    /// and open portrait, book and tabletop), the outer one between closed and tent.
+    /// </summary>
+    public static DuoPose Turned(DuoPose pose) => pose switch
+    {
+        DuoPose.Open => DuoPose.OpenPortrait,
+        DuoPose.OpenPortrait => DuoPose.Open,
+        DuoPose.HalfOpen => DuoPose.Tabletop,
+        DuoPose.Tabletop => DuoPose.HalfOpen,
+        DuoPose.Folded => DuoPose.Tent,
+        _ => DuoPose.Folded,
+    };
 
     /// <summary>Pose from the output of <c>adb shell wm size</c> ("Physical size: …" and, once set, "Override size: …").</summary>
     public static DuoPose? ParsePose(string wmSizeOutput)
@@ -314,7 +338,12 @@ internal static class IPhoneDuo
         "dumpsys window displays | grep -m1 ' cur='; " +
         "echo states:$(cmd device_state print-states-simple 2>/dev/null); " +
         "echo state:$(cmd device_state print-state 2>/dev/null); " +
-        "echo postures:$(cmd overlay list android | grep -c 'x] " + PosturesOverlay + "')";
+        "echo postures:$(cmd overlay list android | grep -c 'x] " + PosturesOverlay + "'); " +
+        "echo rotation:$(settings get system user_rotation); " +
+        "echo features:$(settings get global display_features); " +
+        "echo cutout:$(dumpsys window displays 2>/dev/null | grep -m1 -o 'Cutout=DisplayCutout{insets=Rect([^)]*)'); " +
+        "echo focus:$(dumpsys window 2>/dev/null | grep -m1 mCurrentFocus); " +
+        "echo uptime:$(cut -d' ' -f1 /proc/uptime)";
 
     public static DuoDevice ParseDevice(string output)
     {
@@ -324,11 +353,22 @@ internal static class IPhoneDuo
         bool foldable = new[] { "0", "1", "2" }.All(ids.Contains);
         var state = Regex.Match(output, @"^state:\s*(\d+)\s*$", RegexOptions.Multiline);
         var postures = Regex.Match(output, @"^postures:\s*(\d+)", RegexOptions.Multiline);
+        var rotation = Regex.Match(output, @"^rotation:\s*(\d+)\s*$", RegexOptions.Multiline);
+        var features = Regex.Match(output, @"^features:\s*(\S*)\s*$", RegexOptions.Multiline);
+        var cutout = Regex.Match(output, @"insets=Rect\((-?\d+), (-?\d+) - (-?\d+), (-?\d+)\)");
+        var focus = Regex.Match(output, @"^focus:.*mCurrentFocus=Window\{\S+ \S+ ([^/\s}]+)", RegexOptions.Multiline);
+        var uptime = Regex.Match(output, @"^uptime:\s*([\d.]+)", RegexOptions.Multiline);
+        int Group(Match m, int i) => int.Parse(m.Groups[i].Value);
         return new DuoDevice(
             current.Success ? new Size(int.Parse(current.Groups[1].Value), int.Parse(current.Groups[2].Value)) : null,
             foldable,
             foldable && state.Success ? int.Parse(state.Groups[1].Value) : null,
-            postures.Success && postures.Groups[1].Value != "0");
+            postures.Success && postures.Groups[1].Value != "0",
+            rotation.Success ? Group(rotation, 1) : null,
+            features.Success && features.Groups[1].Value.Length > 0 ? features.Groups[1].Value : null,
+            cutout.Success ? (Group(cutout, 1), Group(cutout, 2), Group(cutout, 3), Group(cutout, 4)) : null,
+            focus.Success ? focus.Groups[1].Value : null,
+            uptime.Success && double.TryParse(uptime.Groups[1].Value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double up) ? up : null);
     }
 
     // ---- placement ----------------------------------------------------------------------------------------------

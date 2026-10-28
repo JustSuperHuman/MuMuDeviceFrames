@@ -98,6 +98,13 @@ internal sealed class TrayApp : ApplicationContext
         _foregroundHook = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, IntPtr.Zero,
             _foregroundChanged, 0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
         if (_foregroundHook == IntPtr.Zero) Log.Write("Could not monitor the active emulator window");
+        // A monitor added, removed, rearranged or rescaled: lay every frame out again (anchors are clamped to the new
+        // work areas, frames rendered for the new size).
+        Microsoft.Win32.SystemEvents.DisplaySettingsChanged += (_, _) => Post(() =>
+        {
+            Log.Write("Display settings changed; laying the frames out again");
+            SyncAll(invalidate: true);
+        });
 
         if (!File.Exists(AppConfig.FilePath)) Config.Save();
         Startup.Refresh();
@@ -472,7 +479,7 @@ internal sealed class TrayApp : ApplicationContext
                 bool half = IPhoneDuo.IsHalf(pose);
                 string tip = half && !session.IsFoldable ? "Needs Set up as iPhone Duo" : $"{IPhoneDuo.Describe(pose)}   {PoseHotkey(pose)}".TrimEnd();
                 return new PoseChoice(pose, IPhoneDuo.ShortName(pose), canFold && (!half || session.IsFoldable), tip);
-            }).ToList(), session.Pose, pose => session.SetDuoPose(pose)) { Enabled = canFold });
+            }).ToList(), session.Pose, pose => session.SetDuoPose(pose, "the menu")) { Enabled = canFold });
         }
 
         if (ShareXIntegration.FindCompatible(Config.ShareXExecutable) != null)
@@ -725,11 +732,13 @@ internal sealed class TrayApp : ApplicationContext
         }
         RememberEmulator(target);
         Log.Write($"iPhone Duo half-open toggle on '{target.Title}'");
-        return target.ToggleDuoHalf();
+        return target.ToggleDuoHalf($"the {Config.DuoHalfHotkey} hotkey");
     }
 
     /// <summary>Fold (outer display), unfold (inner display), half open, or with no pose fold / unfold.</summary>
-    private bool SetDuoPoseByName(string? name, DuoPose? pose)
+    private bool SetDuoPoseByName(string? name, DuoPose? pose) => SetDuoPoseByName(name, pose, name == null ? "a hotkey" : "the command line");
+
+    private bool SetDuoPoseByName(string? name, DuoPose? pose, string source)
     {
         var target = FindTarget(name);
         if (target == null)
@@ -740,7 +749,7 @@ internal sealed class TrayApp : ApplicationContext
         }
         RememberEmulator(target);
         Log.Write($"iPhone Duo {(pose?.ToString() ?? "toggle")} on '{target.Title}'");
-        return pose is { } p ? target.SetDuoPose(p) : target.ToggleDuoPose();
+        return pose is { } p ? target.SetDuoPose(p, source) : target.ToggleDuoPose(source);
     }
 
     private bool RecordFrame(EmulatorSession session)
@@ -970,7 +979,7 @@ internal sealed class TrayApp : ApplicationContext
         Config.Instance(session.Title).Frame = key;
         Config.Save();
         // Picking "Closed" or "Open" on an emulator set up as a Duo means folding or unfolding it.
-        if (session.IsDuoSurface && IPhoneDuo.PoseOf(Library.Find(key)) is { } pose && pose != session.Pose) session.SetDuoPose(pose);
+        if (session.IsDuoSurface && IPhoneDuo.PoseOf(Library.Find(key)) is { } pose && pose != session.Pose) session.SetDuoPose(pose, "the Frame menu");
         session.Sync();
     }
 
@@ -1029,10 +1038,10 @@ internal sealed class TrayApp : ApplicationContext
             case FramesHotkeyId: ToggleAll(); break;
             case ExpoReloadHotkeyId: RunExpoAction(ExpoAction.Reload); break;
             case ExpoGearHotkeyId: RunExpoAction(ExpoAction.ToggleGear); break;
-            case DuoHotkeyId: SetDuoPoseByName(null, null); break;
+            case DuoHotkeyId: SetDuoPoseByName(null, null, $"the {Config.DuoHotkey} hotkey"); break;
             case DuoHalfHotkeyId: ToggleDuoHalf(); break;
             case >= DuoPoseHotkeyBase when id < DuoPoseHotkeyBase + IPhoneDuo.Poses.Length:
-                SetDuoPoseByName(null, IPhoneDuo.Poses[id - DuoPoseHotkeyBase]);
+                SetDuoPoseByName(null, IPhoneDuo.Poses[id - DuoPoseHotkeyBase], $"the {PoseHotkey(IPhoneDuo.Poses[id - DuoPoseHotkeyBase])} hotkey");
                 break;
         }
     }
@@ -1109,7 +1118,31 @@ internal sealed class TrayApp : ApplicationContext
     private void TrackActiveEmulator(IntPtr hwnd)
     {
         if (SessionForWindow(hwnd) is { } session) RememberEmulator(session);
+        UpdatePoseHotkeys(hwnd);
     }
+
+    private bool _poseHotkeysOn;
+
+    /// <summary>
+    /// The iPhone Duo's hotkeys (the six poses, fold and half open) are only registered while an emulator is the
+    /// foreground window. Registered all the time they fired while typing in other apps, and took Ctrl+Alt+digit from
+    /// keyboards whose AltGr sends Ctrl+Alt. Unregistered, the keys reach whatever app is in front. Ctrl+Alt+F and the
+    /// Expo hotkeys stay global.
+    /// </summary>
+    private void UpdatePoseHotkeys(IntPtr foreground)
+    {
+        bool want = SessionForWindow(foreground) != null;
+        if (want == _poseHotkeysOn) return;
+        _poseHotkeysOn = want;
+        foreach (int id in PoseHotkeyIds) UnregisterHotKey(_window.Handle, id);
+        if (!want) return;
+        RegisterHotkey(DuoHotkeyId, Config.DuoHotkey);
+        RegisterHotkey(DuoHalfHotkeyId, Config.DuoHalfHotkey);
+        if (!string.IsNullOrWhiteSpace(Config.DuoPoseHotkeys))
+            for (int i = 0; i < IPhoneDuo.Poses.Length; i++) RegisterHotkey(DuoPoseHotkeyBase + i, $"{Config.DuoPoseHotkeys}+D{i + 1}");
+    }
+
+    private static IEnumerable<int> PoseHotkeyIds => new[] { DuoHotkeyId, DuoHalfHotkeyId }.Concat(Enumerable.Range(DuoPoseHotkeyBase, IPhoneDuo.Poses.Length));
 
     private void RememberEmulator(EmulatorSession session)
     {
@@ -1125,10 +1158,9 @@ internal sealed class TrayApp : ApplicationContext
         RegisterHotkey(FramesHotkeyId, Config.Hotkey);
         RegisterHotkey(ExpoReloadHotkeyId, Config.ExpoReloadHotkey);
         RegisterHotkey(ExpoGearHotkeyId, Config.ExpoGearHotkey);
-        RegisterHotkey(DuoHotkeyId, Config.DuoHotkey);
-        RegisterHotkey(DuoHalfHotkeyId, Config.DuoHalfHotkey);
-        if (!string.IsNullOrWhiteSpace(Config.DuoPoseHotkeys))
-            for (int i = 0; i < IPhoneDuo.Poses.Length; i++) RegisterHotkey(DuoPoseHotkeyBase + i, $"{Config.DuoPoseHotkeys}+D{i + 1}");
+        // The Duo's hotkeys: only while an emulator is in front (UpdatePoseHotkeys).
+        _poseHotkeysOn = false;
+        UpdatePoseHotkeys(GetForegroundWindow());
     }
 
     private void RegisterHotkey(int id, string binding)

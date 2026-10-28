@@ -183,7 +183,7 @@ Check(!Prop<bool>(plain, "Foldable") && Prop<int?>(plain, "FoldState") == null &
 
 // Drift: after an Android restart MuMu turns the display back and the state override is gone; both must be noticed.
 object Display(System.Drawing.Size current, bool foldable, int? state) => Activator.CreateInstance(assembly.GetType("MuMuDeviceFrames.AndroidDisplay")!,
-    mumuPanel, 480, (System.Drawing.Size?)inner, Activator.CreateInstance(duoDevice, (System.Drawing.Size?)current, foldable, state, true), null)!;
+    mumuPanel, 480, (System.Drawing.Size?)inner, Activator.CreateInstance(duoDevice, (System.Drawing.Size?)current, foldable, state, true, null, null, null, null, null), null)!;
 var inStepTypes = new[] { duoPose, assembly.GetType("MuMuDeviceFrames.AndroidDisplay")! };
 Check((bool)CallTyped("IPhoneDuo", "InStep", inStepTypes, HalfOpen, Display(new(2670, 1878), true, 1))!, "Half open in step");
 Check(!(bool)CallTyped("IPhoneDuo", "InStep", inStepTypes, HalfOpen, Display(new(2670, 1878), true, 0))!, "Half open whose device state was reset is out of step");
@@ -292,3 +292,24 @@ Check(Step(2, 1, [false, false, false]) == 2 && Step(-1, 1, poseEnabled) == 0 &&
     "Pose bar arrows stay put with nothing to choose, and enter from either end");
 foreach (var (seconds, text) in new[] { (0, "0:00"), (42, "0:42"), (65, "1:05"), (3599, "59:59"), (3600, "1:00:00"), (3723, "1:02:03"), (-5, "0:00") })
     Check((string)Call("MenuLayout", "Elapsed", TimeSpan.FromSeconds(seconds))! == text, $"Recording time {seconds} s reads {text}");
+
+// The watchdog's view of Android: rotation, fold line, safe areas, the app in front and uptime, from the one query.
+var watched = Call("IPhoneDuo", "ParseDevice", " cur=1878x2670 app=1878x2670\nstates:0,1,2\nstate:1\npostures:1\nrotation:0\nfeatures:fold-[0,1335,1878,1335]\n" +
+    "cutout:Cutout=DisplayCutout{insets=Rect(0, 0 - 0, 102)\nfocus:mCurrentFocus=Window{7da5b96 u0 app.lawnchair/app.lawnchair.LawnchairLauncher}\nuptime:5123.45\n")!;
+Check(Prop<int?>(watched, "Rotation") == 0 && Prop<string?>(watched, "Features") == "fold-[0,1335,1878,1335]" && Prop<string?>(watched, "Focus") == "app.lawnchair"
+      && Equals(watched.GetType().GetProperty("Cutout")!.GetValue(watched), ((int, int, int, int)?)(0, 0, 0, 102)) && Prop<double?>(watched, "Uptime") == 5123.45,
+    "Device query: rotation, fold line, safe areas, the app in front and uptime");
+object Watched(System.Drawing.Size current, int state, int rotation, string features) => Activator.CreateInstance(assembly.GetType("MuMuDeviceFrames.AndroidDisplay")!,
+    mumuPanel, 480, (System.Drawing.Size?)inner, Activator.CreateInstance(duoDevice, (System.Drawing.Size?)current, true, (int?)state, true, (int?)rotation, features, null, null, null), null)!;
+string foldLine = (string)Call("IPhoneDuo", "FoldFeature", mumuPanel)!;
+Check((bool)CallTyped("IPhoneDuo", "InStep", inStepTypes, Open, Watched(new(2670, 1878), 2, 1, foldLine))!, "Open at rotation 90 with its fold line is in step");
+Check(!(bool)CallTyped("IPhoneDuo", "InStep", inStepTypes, Open, Watched(new(2670, 1878), 2, 3, foldLine))!,
+    "Open turned to 270 looks the same but is out of step (its safe areas would be on the wrong edges)");
+Check(!(bool)CallTyped("IPhoneDuo", "InStep", inStepTypes, Open, Watched(new(2670, 1878), 2, 1, "null"))!, "Open without its fold line is out of step");
+Check(!(bool)CallTyped("IPhoneDuo", "InStep", inStepTypes, Folded, Watched(new(1398, 2034), 0, 1, foldLine))!, "Closed with a fold line left over is out of step");
+var turnedPairs = new[] { (Open, OpenPortrait), (HalfOpen, Tabletop), (Folded, Tent) };
+Check(turnedPairs.All(p => Equals(Call("IPhoneDuo", "Turned", p.Item1), p.Item2) && Equals(Call("IPhoneDuo", "Turned", p.Item2), p.Item1)),
+    "Turning the device a quarter: open and open portrait, book and tabletop, closed and tent");
+var insetsOf = areas.GetType().GetMethod("Insets")!;
+Check(Equals(insetsOf.Invoke(areas, [Open]), (0, 0, 252, 102)) && Equals(insetsOf.Invoke(areas, [Tent]), (0, 0, 252, 102)) && Equals(insetsOf.Invoke(areas, [OpenPortrait]), (0, 0, 0, 102)),
+    "Safe areas the watchdog expects: the rail and home indicator, upright only the home indicator (its top is the status bar)");

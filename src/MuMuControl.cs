@@ -254,6 +254,16 @@ internal static class MuMuControl
         return entries;
     }
 
+    /// <summary>
+    /// MuMu's toolbar rotate: turns MuMu's window between landscape and portrait without turning Android. MuMu keeps its
+    /// window landscape for its home screen (Lawnchair) and for apps it remembers that way; this turns it regardless.
+    /// </summary>
+    public static string? TurnWindow(MuMuInstance instance)
+    {
+        string output = ProcessRunner.Run(instance.ManagerPath, ["control", "-v", instance.Index, "tool", "func", "-n", "rotate"], 15_000).Output;
+        return output.Contains("\"errcode\": 0") || output.Contains("\"errcode\":0") ? null : output.Trim();
+    }
+
     public static AndroidDisplay? QueryDisplay(MuMuInstance instance)
     {
         string wmSize = instance.Shell("wm size").Output;
