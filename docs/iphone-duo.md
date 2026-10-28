@@ -4,6 +4,8 @@ Apple's foldable, folding live in a MuMu emulator: six poses, a fold animation, 
 and the Duo's safe areas as real Android insets. Back to the [README](../README.md); everything else is in the
 [reference](reference.md).
 
+![The iPhone Duo unfolding with JustGains on screen](duo-fold.gif)
+
 ![JustGains on the iPhone Duo in all six poses](duo-poses.png)
 
 ## Getting one
@@ -53,6 +55,8 @@ first time, and leaves the emulator closed:
    `2:3`), signed with the AOSP platform test key like the cutout overlays. Apps read it once per process.
 
 After that nothing needs root: every pose switch runs as the shell user.
+
+![The iPhone Duo with its pose buttons beside it](pose-panel.png)
 
 | Fold / unfold | |
 | --- | --- |

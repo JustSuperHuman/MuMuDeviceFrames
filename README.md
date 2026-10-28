@@ -22,7 +22,11 @@ replace Android's.
 
 Apple's foldable, folding live. Six poses, one click each, and the app keeps running.
 
+![The iPhone Duo unfolding with JustGains on screen](docs/duo-fold.gif)
+
 ![JustGains on the iPhone Duo in all six poses](docs/duo-poses.png)
+
+![The iPhone Duo with its pose buttons beside it](docs/pose-panel.png)
 
 ![iOS on the Duo: the status in the rail, in the corner when upright, and the home indicator](docs/duo-ios.png)
 
@@ -41,6 +45,8 @@ irm https://raw.githubusercontent.com/JustSuperHuman/MuMuDeviceFrames/main/insta
 ```
 
 ## Use
+
+<img src="docs/menu.png" alt="The bezel menu: Copy, Save, Reload, Dev gear and Close apps, the iPhone Duo pose selector, and Record" width="390">
 
 | | |
 | --- | --- |
