@@ -47,7 +47,7 @@ irm https://raw.githubusercontent.com/JustSuperHuman/MuMuDeviceFrames/main/insta
 | Drag the bezel | Move the phone |
 | Right-click the bezel | Screenshot, record, change frame, iPhone Duo pose |
 | `Ctrl+Alt+F` | All frames off or on |
-| `Ctrl+Alt+1` to `Ctrl+Alt+6` | iPhone Duo poses |
+| `Ctrl+Alt+1` to `Ctrl+Alt+6` | iPhone Duo poses (while an emulator is in front) |
 
 Every option, hotkey and command is in the [reference](docs/reference.md).
 

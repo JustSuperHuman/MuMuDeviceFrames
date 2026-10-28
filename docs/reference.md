@@ -83,7 +83,7 @@ unins000.exe /VERYSILENT [/REMOVESETTINGS=1] [/REMOVEOVERLAYS=1]
 | Action | Result |
 | --- | --- |
 | Drag the bezel | Moves the emulator (its title bar is hidden, so the bezel is the handle) |
-| Right-click the bezel | Menu for that emulator: Copy / Save / Reload / Dev gear tiles, recording when compatible ShareX is installed, then frame, Android display, minimize |
+| Right-click the bezel | Menu for that emulator: Copy, Save, Reload, Dev gear and Close apps tiles; on an iPhone Duo, the pose selector (click a pose to switch); a **Record entire frame** button when compatible ShareX is installed (it becomes **Stop recording** with the elapsed time while one runs); then frame, Android display, the iPhone Duo submenu (Check iPhone Duo, Animate folding, Show pose controls) and minimize |
 | Double-click the bezel | Peek: brings MuMu's title bar and toolbar back without dropping the frame; again to hide |
 | `Ctrl+Alt+F` | All frames off / on (off = emulators look exactly like stock MuMu) |
 | `Ctrl+Alt+R` | Reload the Expo app in the active or last active emulator |
