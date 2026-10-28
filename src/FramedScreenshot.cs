@@ -57,12 +57,16 @@ internal static class FramedScreenshot
 
     public static Bitmap Compose(FrameInfo frame, byte[] screenshotPng, string? background, StatusBar? statusBar = null)
     {
+        using var shot = new Bitmap(new MemoryStream(screenshotPng));
+        // iPhone Duo: the screenshot's size says which display was on, so it always lands in the matching frame.
+        if (IPhoneDuo.IsDuo(frame) && IPhoneDuo.PoseForScreen(shot.Size) is { } pose && IPhoneDuo.PoseOf(frame) != pose)
+            frame = DuoFrames.Frame(AppConfig.BuiltInFramesRoot, pose);
+
         var source = FrameSource.Load(frame);
         var screen = source.Screen;
         int width = source.Width, height = source.Height;
 
         // Screenshot scaled to fill the screen hole (centre-cropped when the aspect differs), rotated if needed.
-        using var shot = new Bitmap(new MemoryStream(screenshotPng));
         using var fitted = new Bitmap(screen.Width, screen.Height, PixelFormat.Format32bppArgb);
         using (var g = Graphics.FromImage(fitted))
         {
@@ -72,7 +76,14 @@ internal static class FramedScreenshot
             if (shot.Width > shot.Height != screen.Width > screen.Height) shot.RotateFlip(RotateFlipType.Rotate270FlipNone);
             double scale = Math.Max((double)screen.Width / shot.Width, (double)screen.Height / shot.Height);
             int w = (int)Math.Round(shot.Width * scale), h = (int)Math.Round(shot.Height * scale);
-            g.DrawImage(shot, (screen.Width - w) / 2, (screen.Height - h) / 2, w, h);
+            if (w == shot.Width && h == shot.Height)
+            {
+                // Native resolution: copy the pixels as they are rather than resampling at scale 1.
+                g.CompositingMode = CompositingMode.SourceCopy;
+                g.InterpolationMode = InterpolationMode.NearestNeighbor;
+                g.PixelOffsetMode = PixelOffsetMode.Half;
+            }
+            g.DrawImage(shot, new Rectangle((screen.Width - w) / 2, (screen.Height - h) / 2, w, h), new Rectangle(0, 0, shot.Width, shot.Height), GraphicsUnit.Pixel);
         }
 
         var canvas = new byte[width * height * 4];
@@ -105,6 +116,17 @@ internal static class FramedScreenshot
             }
         }
         fitted.UnlockBits(data);
+
+        // What the glass adds over the picture (the open iPhone Duo's crease), straight alpha.
+        if (source.Glass is { } glass)
+        {
+            for (int i = 0; i < width * height; i++)
+            {
+                int a = glass[i * 4 + 3], p = i * 4;
+                if (a == 0 || canvas[p + 3] != 255) continue; // only over the picture
+                for (int c = 0; c < 3; c++) canvas[p + c] = (byte)((glass[p + c] * a + canvas[p + c] * (255 - a) + 127) / 255);
+            }
+        }
 
         if (statusBar != null)
         {

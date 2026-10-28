@@ -7,6 +7,8 @@ internal sealed record FrameInfo(string Category, string Model, string Variant, 
     public string Key => $"{Category}/{Model}/{Variant}";
     public string FramePath => Path.Combine(Dir, "frame.png");
     public string MaskPath => Path.Combine(Dir, "mask.png");
+    /// <summary>Optional: what the glass adds on top of the picture (the open iPhone Duo's crease). Drawn click-through.</summary>
+    public string GlassPath => Path.Combine(Dir, "glass.png");
     public bool IsLandscape => Screen.Width > Screen.Height;
 
     /// <summary>Short side / long side, so portrait and landscape compare equal.</summary>
@@ -27,13 +29,16 @@ internal sealed class FrameLibrary
 
     public IReadOnlyList<FrameInfo> Frames { get; }
     public string Root { get; }
+    /// <summary>Frames from the downloaded set, without the ones this app draws itself (iPhone Duo).</summary>
+    public int DownloadedCount { get; }
 
     private readonly Dictionary<string, FrameInfo> _byKey;
 
-    private FrameLibrary(string root, List<FrameInfo> frames)
+    private FrameLibrary(string root, List<FrameInfo> frames, int downloaded)
     {
         Root = root;
         Frames = frames;
+        DownloadedCount = downloaded;
         _byKey = frames.ToDictionary(f => f.Key, StringComparer.OrdinalIgnoreCase);
     }
 
@@ -66,6 +71,11 @@ internal sealed class FrameLibrary
             }
         }
 
+        int downloaded = frames.Count;
+        // Drawn by this app (device-frames-media has no iPhone Duo), so they are there without a download.
+        foreach (var duo in DuoFrames.Ensure(AppConfig.BuiltInFramesRoot))
+            if (!frames.Any(f => string.Equals(f.Key, duo.Key, StringComparison.OrdinalIgnoreCase))) frames.Add(duo);
+
         frames.Sort((a, b) =>
         {
             int c = Native.StrCmpLogicalW(a.Category, b.Category);
@@ -73,19 +83,21 @@ internal sealed class FrameLibrary
             if (c == 0) c = Native.StrCmpLogicalW(a.Variant, b.Variant);
             return c;
         });
-        Log.Write($"Frame library: {frames.Count} frames from {root}");
-        return new FrameLibrary(root, frames);
+        Log.Write($"Frame library: {frames.Count} frames ({downloaded} from {root})");
+        return new FrameLibrary(root, frames, downloaded);
     }
 
     public FrameInfo? Find(string? key) => key != null && _byKey.TryGetValue(key.Replace('\\', '/'), out var f) ? f : null;
 
     /// <summary>The frame whose screen aspect is closest to the emulator picture; newest model wins ties.</summary>
+    /// <remarks>Never the iPhone Duo: its frames only fit an emulator set up for it, which picks them by pose instead.</remarks>
     public FrameInfo? BestMatch(int width, int height)
     {
         FrameInfo? best = null;
         double bestScore = double.MaxValue;
         foreach (var f in Frames)
         {
+            if (IPhoneDuo.IsDuo(f)) continue;
             double score = Math.Round(f.Mismatch(width, height), 4);
             if (f.Variant.Contains("Shadow", StringComparison.OrdinalIgnoreCase)) score += 1e-5;
             // On ties a different model replaces the current pick: the list is naturally sorted, so later means newer.

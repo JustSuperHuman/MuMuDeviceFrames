@@ -11,7 +11,9 @@ internal sealed class EmulatorSession : IDisposable
     private readonly WinEventProc _eventProc; // must stay referenced while the hooks live
     private readonly List<IntPtr> _hooks = [];
     private OverlayWindow? _overlay;
+    private OverlayWindow? _glass; // click-through layer over the picture (the open iPhone Duo's crease)
     private RenderedFrame? _current;
+    private RenderedFrame? _shown, _glassShown; // what the overlay and glass windows currently hold
     private RenderKey? _pending;
     private (Point Offset, RenderKey Key, RECT Box)? _region;
     private System.Windows.Forms.Timer? _verifyTimer;
@@ -20,10 +22,20 @@ internal sealed class EmulatorSession : IDisposable
     private bool _androidBusy;
     private DateTime _nextDisplayQuery;
     private string? _failedCutout;
+    private DuoPose? _wantedPose;
+    private DateTime _nextPosePoll;
+    private bool _autoPoseTried;
+    private bool _displayAnswered; // the first display query came back (with or without an answer)
 
     /// <summary>adb endpoint and native display, known a moment after attaching (null until then).</summary>
     public MuMuInstance? Instance { get; private set; }
     public AndroidDisplay? Display { get; private set; }
+
+    /// <summary>iPhone Duo pose Android is in (from <c>wm size</c>); null when the emulator is not in one.</summary>
+    public DuoPose? Pose { get; private set; }
+
+    /// <summary>The emulator runs at the iPhone Duo's 2670 × 2034 surface, so it can fold and unfold.</summary>
+    public bool IsDuoSurface => Display != null && IPhoneDuo.IsSurface(Display.Native);
 
     public IntPtr Main { get; }
     public IntPtr Render { get; private set; }
@@ -97,14 +109,38 @@ internal sealed class EmulatorSession : IDisposable
         }
 
         RenderSize = new Size(rr.Width, rr.Height);
-        Frame = _app.Library.Find(instance.Frame) ?? _app.Library.Find(config.DefaultFrame) ?? _app.Library.BestMatch(rr.Width, rr.Height);
+        var chosen = _app.Library.Find(instance.Frame);
+        // An emulator in an iPhone Duo pose wears the Duo frame for that pose, unless it was given another frame.
+        if (Pose is { } pose && (chosen == null || IPhoneDuo.IsDuo(chosen))) chosen = _app.Library.Find(IPhoneDuo.FrameKey(pose)) ?? chosen;
+        Frame = chosen ?? _app.Library.Find(config.DefaultFrame) ?? _app.Library.BestMatch(rr.Width, rr.Height);
         if (Frame == null)
         {
             Suspend();
             return;
         }
+        EnsureAndroid();
 
-        var key = new RenderKey(Frame.Key, rr.Width, rr.Height, Math.Clamp(config.Overlap, 0, 8));
+        // A Duo frame, or an automatic one on a picture shaped like the Duo surface: until Android has first said which
+        // display is on, any frame or placement could be the wrong one (and would flash up for a moment).
+        if (!_displayAnswered && (IPhoneDuo.IsDuo(Frame) || (chosen == null && IPhoneDuo.LooksLikeSurface(RenderSize))))
+        {
+            Suspend();
+            return;
+        }
+
+        // The picture: all of MuMu's render surface, or for the iPhone Duo the centred part the current display uses.
+        var picture = new Rectangle(0, 0, rr.Width, rr.Height);
+        if (IPhoneDuo.IsDuo(Frame))
+        {
+            if (IsDuoSurface && Pose == null)
+            {
+                Suspend(); // a pose is on its way (see EnsureAndroid)
+                return;
+            }
+            if (Pose is { } shown && IPhoneDuo.PictureInRender(shown, RenderSize) is { } part) picture = part;
+        }
+
+        var key = new RenderKey(Frame.Key, picture.Width, picture.Height, Math.Clamp(config.Overlap, 0, 8));
         if (_current == null || _current.Key != key)
         {
             // Never show a frame that doesn't match the picture; take it down until the new one is ready.
@@ -113,12 +149,51 @@ internal sealed class EmulatorSession : IDisposable
             return;
         }
 
-        ApplyRegion(new Point(rr.Left - wr.Left, rr.Top - wr.Top));
-        var position = new Point(rr.Left - _current.RenderOffset.X, rr.Top - _current.RenderOffset.Y);
-        EnsureOverlay()?.MoveTo(position);
-        _overlay?.SetVisible(true);
-        EnsureAndroid();
+        ApplyRegion(new Point(rr.Left - wr.Left + picture.X, rr.Top - wr.Top + picture.Y));
+        ShowOverlay(new Point(rr.Left + picture.X - _current.RenderOffset.X, rr.Top + picture.Y - _current.RenderOffset.Y));
         EnsureStatusBar(new Point(rr.Left, rr.Top));
+    }
+
+    /// <summary>Puts the current frame (and its glass layer, if any) at <paramref name="position"/> and shows it.</summary>
+    private void ShowOverlay(Point position)
+    {
+        var overlay = EnsureOverlay();
+        if (overlay == null || _current == null) return;
+        if (_shown != _current)
+        {
+            overlay.SetFrame(_current, position);
+            _shown = _current;
+        }
+        else overlay.MoveTo(position);
+        overlay.SetVisible(true);
+
+        if (_current.Glass is not { } glass)
+        {
+            _glass?.SetVisible(false);
+            return;
+        }
+        if (_glass is not { IsAlive: true })
+        {
+            try
+            {
+                _glass = new OverlayWindow(Main, interactive: false); // never takes a tap meant for the app
+                _glassShown = null;
+                overlay.Companions = [_bar, _glass];
+            }
+            catch (Exception ex)
+            {
+                Log.Write($"Glass window failed for '{Title}': {ex.Message}");
+                return;
+            }
+        }
+        var at = new Point(position.X + glass.Bounds.X, position.Y + glass.Bounds.Y);
+        if (_glassShown != _current)
+        {
+            _glass.SetBitmap(glass.Pixels, glass.Bounds.Width, glass.Bounds.Height, at);
+            _glassShown = _current;
+        }
+        else _glass.MoveTo(at);
+        _glass.SetVisible(true);
     }
 
     // ---- iOS-style status bar ------------------------------------------------------------------------------------
@@ -135,7 +210,8 @@ internal sealed class EmulatorSession : IDisposable
     /// <summary>Keeps the band window in step with the setting, the picture and Android's light/dark request.</summary>
     private void EnsureStatusBar(Point picture)
     {
-        bool wanted = _app.Config.IosStatusBarFor(Title) && Instance != null && Display != null && Frame != null;
+        // Never on the iPhone Duo: the app draws the time and status in its own rail there.
+        bool wanted = _app.Config.IosStatusBarFor(Title) && Instance != null && Display != null && Frame != null && !IPhoneDuo.IsDuo(Frame);
         // Drawing the bar alone does not reserve space in apps. Wait for Android's matching insets before covering it.
         wanted = wanted && _app.Config.Instance(Title).InstalledCutout ==
             AndroidCutout.Signature(Frame!, Display!, _app.Config.StatusBarPaddingFactor, hideNotificationIcons: true);
@@ -186,7 +262,7 @@ internal sealed class EmulatorSession : IDisposable
             {
                 _bar = new OverlayWindow(Main, interactive: false); // WS_EX_TRANSPARENT: the notification shade stays reachable
                 _barShown = null;
-                if (_overlay != null) _overlay.Companion = _bar;
+                if (_overlay != null) _overlay.Companions = [_bar, _glass];
             }
             catch (Exception ex)
             {
@@ -250,29 +326,37 @@ internal sealed class EmulatorSession : IDisposable
         if (Display == null)
         {
             if (DateTime.UtcNow < _nextDisplayQuery) return;
-            _nextDisplayQuery = DateTime.UtcNow.AddSeconds(10); // Android may still be booting; try again later
-            RunAndroidTask(() =>
-            {
-                var instance = Instance ?? MuMuControl.Locate(Pid);
-                var display = instance == null ? null : MuMuControl.QueryDisplay(instance);
-                return () =>
-                {
-                    Instance = instance;
-                    Display = display;
-                    if (display != null) Log.Write($"'{Title}': MuMu instance {instance!.Index}, adb {instance.AdbSerial}, display {display.Native.Width}x{display.Native.Height} @ {display.Density} dpi");
-                };
-            });
+            StartDisplayQuery();
             return;
         }
 
         var config = _app.Config.Instance(Title);
         if (Instance == null) return;
-        if (!_app.Config.CutoutFor(Title))
+
+        if (IsDuoSurface)
         {
-            // Switched off (here or globally): take the overlays back out.
+            // A Duo frame was picked for an emulator that is not in a pose yet: put it in that frame's pose (once).
+            if (Pose == null && IPhoneDuo.PoseOf(Frame) is { } framePose && !_autoPoseTried)
+            {
+                _autoPoseTried = true;
+                StartPoseSwitch(framePose);
+                return;
+            }
+            // Keep up with poses switched from outside this app (adb, scripts): a cheap wm size every few seconds.
+            if (DateTime.UtcNow >= _nextPosePoll)
+            {
+                PollPose();
+                return;
+            }
+        }
+
+        if (!_app.Config.CutoutFor(Title) || IPhoneDuo.IsDuo(Frame))
+        {
+            // Switched off (here or globally), or an iPhone Duo, whose app draws its own rail: take the overlays back out.
             if (config.InstalledCutout != null) RemoveCutout();
             return;
         }
+
         bool iosBar = _app.Config.IosStatusBarFor(Title);
         string signature = AndroidCutout.Signature(Frame, Display, _app.Config.StatusBarPaddingFactor, iosBar);
         if (signature == config.InstalledCutout || signature == _failedCutout) return;
@@ -305,6 +389,162 @@ internal sealed class EmulatorSession : IDisposable
                     Log.Write($"'{Title}': cutout failed: {error}");
                     _app.Notify($"{Title}: could not match the Android status bar. {error}", warning: true);
                 }
+            };
+        });
+    }
+
+    /// <summary>Finds the adb endpoint (once) and asks Android for its display and iPhone Duo pose.</summary>
+    private void StartDisplayQuery()
+    {
+        _nextDisplayQuery = DateTime.UtcNow.AddSeconds(10); // Android may still be booting; try again later
+        RunAndroidTask(() =>
+        {
+            MuMuInstance? instance = Instance;
+            AndroidDisplay? display = null;
+            try
+            {
+                instance ??= MuMuControl.Locate(Pid);
+                display = instance == null ? null : MuMuControl.QueryDisplay(instance);
+            }
+            catch (Exception ex)
+            {
+                Log.Write($"'{Title}': display query failed: {ex.Message}"); // still an answer: frames must not wait forever
+            }
+            return () =>
+            {
+                Instance = instance;
+                Display = display;
+                Pose = IPhoneDuo.Detect(display);
+                _displayAnswered = true;
+                if (display != null) Log.Write($"'{Title}': MuMu instance {instance!.Index}, adb {instance.AdbSerial}, display {display.Native.Width}x{display.Native.Height} @ {display.Density} dpi" +
+                    (display.Override is { } o ? $", override {o.Width}x{o.Height}" : "") + (Pose is { } p ? $", iPhone Duo {p}" : ""));
+                Sync();
+            };
+        });
+    }
+
+    // ---- iPhone Duo: fold and unfold ----------------------------------------------------------------------------
+
+    /// <summary>Folds or unfolds the iPhone Duo. False (after telling the user why) when this emulator cannot.</summary>
+    public bool SetDuoPose(DuoPose pose)
+    {
+        if (Display != null && !IsDuoSurface)
+        {
+            NotDuo();
+            return false;
+        }
+        _wantedPose = pose;
+        if (_androidBusy) return true; // started when the running adb task ends
+        if (Display == null) StartDisplayQuery(); // works with frames switched off too; the pose follows the answer
+        else StartWantedPose();
+        return true;
+    }
+
+    public bool ToggleDuoPose() => SetDuoPose(Pose is { } pose ? IPhoneDuo.Other(pose) : DuoPose.Folded);
+
+    private void NotDuo() =>
+        _app.Notify($"{Title} is not set up as an iPhone Duo. Use Android display, Set up as iPhone Duo, first.", warning: true);
+
+    private void StartWantedPose()
+    {
+        if (_wantedPose is not { } pose || Instance == null || Display == null) return;
+        _wantedPose = null;
+        if (!IsDuoSurface)
+        {
+            NotDuo();
+            return;
+        }
+        // Folding means showing the Duo: an explicit choice of another frame gives way to the Duo frame for that pose.
+        var instance = _app.Config.Instance(Title);
+        if (instance.Frame != null && instance.Frame != IPhoneDuo.FrameKey(pose))
+        {
+            instance.Frame = IPhoneDuo.FrameKey(pose);
+            _app.Config.Save();
+        }
+        StartPoseSwitch(pose);
+    }
+
+    /// <summary>
+    /// Runs the <c>wm</c> commands for a pose. The new frame is rendered first, so it goes up as soon as Android has
+    /// switched (the picture changes size at that moment and the old clip would show the wrong part of it).
+    /// </summary>
+    private void StartPoseSwitch(DuoPose pose)
+    {
+        var (instance, display) = (Instance!, Display!);
+        var frame = _app.Library.Find(IPhoneDuo.FrameKey(pose));
+        RenderKey? key = frame != null && IPhoneDuo.PictureInRender(pose, RenderSize) is { } picture
+            ? new RenderKey(frame.Key, picture.Width, picture.Height, Math.Clamp(_app.Config.Overlap, 0, 8))
+            : null;
+        _nextPosePoll = DateTime.UtcNow.AddSeconds(4);
+        RunAndroidTask(() =>
+        {
+            var rendered = key is { } k ? FrameRenderer.Render(frame!, k) : null;
+            var (_, output) = instance.Shell(string.Join("; ", IPhoneDuo.Commands(pose, display.Native)));
+            var now = MuMuControl.QueryDisplay(instance);
+            return () =>
+            {
+                if (now != null) Display = now;
+                var reached = IPhoneDuo.Detect(Display);
+                Log.Write($"'{Title}': iPhone Duo -> {pose}: {(reached == pose ? "done" : $"still {reached?.ToString() ?? "no pose"} ({output.Trim()})")}");
+                if (reached != pose)
+                    _app.Notify($"{Title}: could not {(pose == DuoPose.Folded ? "fold" : "unfold")} the iPhone Duo. {output.Trim()}".TrimEnd(), warning: true);
+                SetPose(reached);
+                if (rendered != null && reached == pose)
+                {
+                    _pending = null;
+                    _current = rendered;
+                }
+                Sync();
+            };
+        });
+    }
+
+    private void PollPose()
+    {
+        _nextPosePoll = DateTime.UtcNow.AddSeconds(4);
+        var instance = Instance!;
+        RunAndroidTask(() =>
+        {
+            var display = MuMuControl.QueryDisplay(instance);
+            return () =>
+            {
+                if (display == null) return;
+                Display = display;
+                var pose = IPhoneDuo.Detect(display);
+                if (pose == Pose) return;
+                Log.Write($"'{Title}': iPhone Duo pose changed outside the app: {pose?.ToString() ?? "none"}");
+                SetPose(pose);
+                Sync();
+            };
+        });
+    }
+
+    /// <summary>Records the pose and keeps a stored Duo frame choice on the matching variant, so menus and restarts agree.</summary>
+    private void SetPose(DuoPose? pose)
+    {
+        Pose = pose;
+        var instance = _app.Config.Instance(Title);
+        if (pose is not { } p || !IPhoneDuo.IsDuo(_app.Library.Find(instance.Frame)) || instance.Frame == IPhoneDuo.FrameKey(p)) return;
+        instance.Frame = IPhoneDuo.FrameKey(p);
+        _app.Config.Save();
+    }
+
+    /// <summary>Gives the emulator the Duo's 2670 × 2034 surface at 480 dpi and restarts it (MuMu applies resolutions on start).</summary>
+    public void SetUpAsDuo()
+    {
+        if (Instance is not { } instance) return;
+        RunAndroidTask(() =>
+        {
+            string result = MuMuControl.SetResolution(instance, IPhoneDuo.Surface, IPhoneDuo.Density);
+            Log.Write($"'{Title}': resolution -> iPhone Duo {IPhoneDuo.Surface.Width}x{IPhoneDuo.Surface.Height} @ {IPhoneDuo.Density} dpi: {result}");
+            string restart = MuMuControl.Restart(instance);
+            Log.Write($"'{Title}': restart: {restart}");
+            return () =>
+            {
+                Display = null;
+                Pose = null;
+                _autoPoseTried = false;
+                _displayAnswered = false;
             };
         });
     }
@@ -370,6 +610,7 @@ internal sealed class EmulatorSession : IDisposable
                 _androidBusy = false;
                 if (_disposed) return;
                 done?.Invoke();
+                if (!_androidBusy) StartWantedPose(); // a fold or unfold asked for while this task ran
             });
         });
     }
@@ -399,8 +640,6 @@ internal sealed class EmulatorSession : IDisposable
         if (_disposed || _pending != key) return;
         _pending = null;
         _current = rendered;
-        if (IsGone || !GetWindowRect(Render, out var rr)) return;
-        EnsureOverlay()?.SetFrame(rendered, new Point(rr.Left - rendered.RenderOffset.X, rr.Top - rendered.RenderOffset.Y));
         Sync();
     }
 
@@ -409,11 +648,10 @@ internal sealed class EmulatorSession : IDisposable
         if (_overlay is { IsAlive: true }) return _overlay;
         try
         {
-            _overlay = new OverlayWindow(Main, _app.Config.BezelInteractive) { Companion = _bar };
+            _overlay = new OverlayWindow(Main, _app.Config.BezelInteractive) { Companions = [_bar, _glass] };
             _overlay.MenuRequested += () => _app.ShowSessionMenu(this);
             _overlay.DoubleClicked += () => { Peek = !Peek; Sync(); };
-            if (_current != null && GetWindowRect(Render, out var rr))
-                _overlay.SetFrame(_current, new Point(rr.Left - _current.RenderOffset.X, rr.Top - _current.RenderOffset.Y));
+            _shown = null; // the caller puts the bitmap in
         }
         catch (Exception ex)
         {
@@ -476,6 +714,7 @@ internal sealed class EmulatorSession : IDisposable
     public void Suspend()
     {
         _overlay?.SetVisible(false);
+        _glass?.SetVisible(false);
         _bar?.SetVisible(false);
         _barTimer?.Stop();
         ClearRegion();
@@ -515,6 +754,8 @@ internal sealed class EmulatorSession : IDisposable
         _barTimer = null;
         if (_bar is { IsAlive: true }) _bar.DestroyHandle();
         _bar = null;
+        if (_glass is { IsAlive: true }) _glass.DestroyHandle();
+        _glass = null;
         if (_overlay is { IsAlive: true }) _overlay.DestroyHandle();
         _overlay = null;
         if (_barApplied && Instance is { } instance)

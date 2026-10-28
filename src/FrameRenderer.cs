@@ -11,6 +11,8 @@ internal sealed class FrameSource
     public required byte[] Bgra { get; init; }
     public required byte[] Mask { get; init; }
     public required Rectangle Screen { get; init; }
+    /// <summary>Optional glass.png (straight-alpha BGRA, frame-sized): drawn over the picture, not part of the bezel.</summary>
+    public byte[]? Glass { get; init; }
 
     /// <summary>Uncached decode; rendering goes through <see cref="FrameRenderer"/>, which keeps recent sources around.</summary>
     public static FrameSource Load(FrameInfo info)
@@ -21,7 +23,15 @@ internal sealed class FrameSource
 
         var mask = new byte[w * h];
         for (int i = 0; i < mask.Length; i++) mask[i] = maskBgra[i * 4];
-        return new FrameSource { Width = w, Height = h, Bgra = bgra, Mask = mask, Screen = info.Screen };
+
+        byte[]? glass = null;
+        if (File.Exists(info.GlassPath))
+        {
+            var (gw, gh, glassBgra) = Decode(info.GlassPath);
+            if (gw == w && gh == h) glass = glassBgra;
+            else Log.Write($"Ignoring glass.png of {info.Key}: {gw}x{gh}, frame is {w}x{h}");
+        }
+        return new FrameSource { Width = w, Height = h, Bgra = bgra, Mask = mask, Screen = info.Screen, Glass = glass };
     }
 
     private static (int W, int H, byte[] Bgra) Decode(string path)
@@ -48,6 +58,7 @@ internal sealed class FrameSource
         int nw = Height, nh = Width;
         var bgra = new byte[Bgra.Length];
         var mask = new byte[Mask.Length];
+        var glass = Glass == null ? null : new byte[Glass.Length];
         for (int y = 0; y < Height; y++)
         {
             for (int x = 0; x < Width; x++)
@@ -57,12 +68,13 @@ internal sealed class FrameSource
                 int s = y * Width + x, d = ny * nw + nx;
                 mask[d] = Mask[s];
                 Buffer.BlockCopy(Bgra, s * 4, bgra, d * 4, 4);
+                if (glass != null) Buffer.BlockCopy(Glass!, s * 4, glass, d * 4, 4);
             }
         }
         var screen = counterClockwise
             ? new Rectangle(Screen.Y, Width - Screen.Right, Screen.Height, Screen.Width)
             : new Rectangle(Height - Screen.Bottom, Screen.X, Screen.Height, Screen.Width);
-        return new FrameSource { Width = nw, Height = nh, Bgra = bgra, Mask = mask, Screen = screen };
+        return new FrameSource { Width = nw, Height = nh, Bgra = bgra, Mask = mask, Screen = screen, Glass = glass };
     }
 }
 
@@ -81,6 +93,11 @@ internal sealed class RenderedFrame
     /// <summary>Visible part of the emulator picture as runs (y, x0, x1-exclusive), relative to the picture's top-left.</summary>
     public required (int Y, int X0, int X1)[] ScreenRuns { get; init; }
     public required bool Stretched { get; init; }
+    /// <summary>
+    /// What the glass draws over the picture (premultiplied BGRA), cropped to <c>Bounds</c> in overlay coordinates. It
+    /// goes in a separate click-through window: in the bezel window any visible pixel would swallow taps on the app.
+    /// </summary>
+    public (byte[] Pixels, Rectangle Bounds)? Glass { get; init; }
 }
 
 internal static class FrameRenderer
@@ -187,12 +204,48 @@ internal static class FrameRenderer
         var mask = Resampler.Resample(src.Mask, src.Width, src.Height, 1, premultiply: false, cx, cy);
         var renderOffset = new Point(padL - insetX, padT - insetY);
         var runs = BuildScreenRuns(mask, width, height, renderOffset, rw, rh);
+        var glass = src.Glass == null ? null : RenderGlass(src.Glass, src.Width, src.Height, cx, cy, mask, width, height);
 
         return new RenderedFrame
         {
             Key = key, Width = width, Height = height, Pixels = pixels,
-            RenderOffset = renderOffset, ScreenRuns = runs, Stretched = stretched,
+            RenderOffset = renderOffset, ScreenRuns = runs, Stretched = stretched, Glass = glass,
         };
+    }
+
+    /// <summary>The glass layer at the overlay's scale, kept to the screen and cropped to what is visible.</summary>
+    private static (byte[] Pixels, Rectangle Bounds)? RenderGlass(byte[] glass, int srcW, int srcH, Resampler.Contrib[] cx, Resampler.Contrib[] cy,
+        float[] mask, int width, int height)
+    {
+        var color = Resampler.Resample(glass, srcW, srcH, 4, premultiply: true, cx, cy);
+        int left = width, top = height, right = -1, bottom = -1;
+        var alpha = new byte[width * height];
+        for (int i = 0; i < width * height; i++)
+        {
+            if (mask[i] <= 127.5f) continue; // filter spill onto the bezel
+            float a = Math.Clamp(color[i * 4 + 3], 0f, 255f);
+            if (a < 1f) continue;
+            alpha[i] = (byte)(a + 0.5f);
+            int x = i % width, y = i / width;
+            left = Math.Min(left, x); right = Math.Max(right, x);
+            top = Math.Min(top, y); bottom = Math.Max(bottom, y);
+        }
+        if (right < 0) return null;
+
+        var bounds = Rectangle.FromLTRB(left, top, right + 1, bottom + 1);
+        var pixels = new byte[bounds.Width * bounds.Height * 4];
+        for (int y = bounds.Top; y < bounds.Bottom; y++)
+        {
+            for (int x = bounds.Left; x < bounds.Right; x++)
+            {
+                int i = y * width + x, a = alpha[i];
+                if (a == 0) continue;
+                int d = ((y - bounds.Top) * bounds.Width + x - bounds.Left) * 4;
+                for (int c = 0; c < 3; c++) pixels[d + c] = (byte)(Math.Clamp(color[i * 4 + c], 0f, a) + 0.5f);
+                pixels[d + 3] = (byte)a;
+            }
+        }
+        return (pixels, bounds);
     }
 
     /// <summary>

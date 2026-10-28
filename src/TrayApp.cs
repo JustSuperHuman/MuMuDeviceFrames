@@ -7,7 +7,8 @@ namespace MuMuDeviceFrames;
 /// <summary>Tray icon, emulator discovery, menus and global hotkeys.</summary>
 internal sealed class TrayApp : ApplicationContext
 {
-    private const int FramesHotkeyId = 1, ExpoReloadHotkeyId = 2, ExpoGearHotkeyId = 3;
+    private const int FramesHotkeyId = 1, ExpoReloadHotkeyId = 2, ExpoGearHotkeyId = 3, DuoHotkeyId = 4;
+    private static readonly int[] HotkeyIds = [FramesHotkeyId, ExpoReloadHotkeyId, ExpoGearHotkeyId, DuoHotkeyId];
 
     private readonly NotifyIcon _tray;
     private readonly ContextMenuStrip _trayMenu = new();
@@ -32,7 +33,7 @@ internal sealed class TrayApp : ApplicationContext
         Config = AppConfig.Load();
         Library = FrameLibrary.Load(Config.FramesRoot);
 
-        _window = new HiddenWindow(OnHotkey, RunExpoAction, RecordFrameByName, ExitThread);
+        _window = new HiddenWindow(OnHotkey, RunExpoAction, RecordFrameByName, SetDuoPoseByName, ExitThread);
         RegisterHotkeys();
 
         _trayMenu.Opening += (_, _) => BuildMenu(_trayMenu, null);
@@ -51,7 +52,7 @@ internal sealed class TrayApp : ApplicationContext
 
         if (!File.Exists(AppConfig.FilePath)) Config.Save();
         Startup.Refresh();
-        if (Library.Frames.Count == 0) Post(OfferDownload);
+        if (Library.DownloadedCount == 0) Post(OfferDownload);
     }
 
     // ---- frame set ----------------------------------------------------------------------------------------------
@@ -337,9 +338,9 @@ internal sealed class TrayApp : ApplicationContext
     /// <summary>Housekeeping: frame downloads, config and startup.</summary>
     private void AddAppItems(ToolStripItemCollection items)
     {
-        items.Add(Library.Frames.Count == 0
+        items.Add(Library.DownloadedCount == 0
             ? new MenuItem("Download device frames…", DownloadGlyph, DownloadFrames) { Hint = "~35 MB", Enabled = !_downloading }
-            : new MenuItem("Update device frames", DownloadGlyph, DownloadFrames) { Hint = $"{Library.Frames.Count} installed", Enabled = !_downloading });
+            : new MenuItem("Update device frames", DownloadGlyph, DownloadFrames) { Hint = $"{Library.DownloadedCount} installed", Enabled = !_downloading });
         items.Add(new MenuItem("Reload frames and config", RefreshGlyph, Reload));
         items.Add(new MenuItem(_toolsBusy ? "Android display tools setup in progress…" : "Install / repair Android display tools…",
             DownloadGlyph, () => SetupAndroidTools()) { Enabled = !_toolsBusy });
@@ -372,6 +373,22 @@ internal sealed class TrayApp : ApplicationContext
             new Tile("Close apps", CloseAppsGlyph, MenuTiles.Red, MenuTiles.RedDark, () => CloseApps(session), connected,
                 "Close every app running in this emulator")));
 
+        if (session.IsDuoSurface || IPhoneDuo.IsDuo(session.Frame))
+        {
+            // iPhone Duo: the two displays. Each switch is a live wm size change, no restart.
+            bool canFold = connected && session.IsDuoSurface;
+            items.Add(new MenuItem("Fold (outer display)", null, () => session.SetDuoPose(DuoPose.Folded))
+            {
+                Checked = session.Pose == DuoPose.Folded, Enabled = canFold,
+                Hint = session.Pose == DuoPose.Open ? Config.DuoHotkey : "466 × 678 pt",
+            });
+            items.Add(new MenuItem("Unfold (inner display)", null, () => session.SetDuoPose(DuoPose.Open))
+            {
+                Checked = session.Pose == DuoPose.Open, Enabled = canFold,
+                Hint = session.Pose == DuoPose.Folded ? Config.DuoHotkey : "890 × 626 pt",
+            });
+        }
+
         if (ShareXIntegration.FindCompatible(Config.ShareXExecutable) != null)
         {
             items.Add(new MenuItem("Record entire frame", VideoGlyph, () => RecordFrame(session))
@@ -386,7 +403,8 @@ internal sealed class TrayApp : ApplicationContext
         var frames = new MenuItem("Frame", FrameGlyph) { Hint = session.Frame?.Model ?? "None" };
         frames.DropDownItems.Add(Check("Use default frame", instance.Frame == null, () => SetInstanceFrame(session, null)));
         frames.DropDownItems.Add(new MenuSeparator());
-        AddFrameTree(frames.DropDownItems, instance.Frame ?? session.Frame?.Key, session.RenderSize, f => SetInstanceFrame(session, f.Key));
+        AddFrameTree(frames.DropDownItems, instance.Frame ?? session.Frame?.Key, session.RenderSize, f => SetInstanceFrame(session, f.Key),
+            duoFits: session.IsDuoSurface);
         items.Add(frames);
         items.Add(Check("Show frame", instance.Enabled, () =>
         {
@@ -409,6 +427,11 @@ internal sealed class TrayApp : ApplicationContext
 
     private void AddAndroidItems(ToolStripItemCollection items, EmulatorSession session, InstanceConfig instance, bool connected)
     {
+        if (IPhoneDuo.IsDuo(session.Frame))
+        {
+            AddDuoAndroidItems(items, session, connected);
+            return;
+        }
         items.Add(Check("Match status bar and cutout to frame", instance.MatchAndroidCutout, () =>
         {
             instance.MatchAndroidCutout = !instance.MatchAndroidCutout;
@@ -454,6 +477,33 @@ internal sealed class TrayApp : ApplicationContext
         });
     }
 
+    /// <summary>
+    /// The iPhone Duo leaves the status bar to the app (it draws its own rail), so there is no cutout or iOS bar to
+    /// match; what matters is the 2670 × 2034 surface both poses are cut from.
+    /// </summary>
+    private void AddDuoAndroidItems(ToolStripItemCollection items, EmulatorSession session, bool connected)
+    {
+        items.Add(new MenuItem("Status bar and cutout") { Hint = "Drawn by the app on iPhone Duo", Enabled = false });
+        if (session.Display is not { } display) return;
+        items.Add(new MenuSeparator());
+        var surface = IPhoneDuo.Surface;
+        if (session.IsDuoSurface)
+        {
+            items.Add(new MenuItem("Set up as iPhone Duo") { Checked = true, Enabled = false, Hint = $"{surface.Width}×{surface.Height}" });
+            return;
+        }
+        items.Add(new MenuItem("Set up as iPhone Duo…", null, () =>
+        {
+            var answer = MessageBox.Show(
+                $"Set {session.Title} to {surface.Width}×{surface.Height} at {IPhoneDuo.Density} dpi and restart it now?\n\n" +
+                $"Currently {display.Native.Width}×{display.Native.Height} at {display.Density} dpi. Both iPhone Duo displays fit that surface at 1:1, " +
+                "and folding or unfolding afterwards switches between them without a restart. Anything unsaved inside the emulator is lost by the restart.",
+                "MuMu Device Frames", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning);
+            if (answer == DialogResult.OK) session.SetUpAsDuo();
+        })
+        { Hint = "Restarts", HintTone = HintTone.Caution, Enabled = connected });
+    }
+
     private void SetRecordingPadding(int padding)
     {
         Config.RecordingPadding = Math.Clamp(padding, 0, 500);
@@ -485,7 +535,8 @@ internal sealed class TrayApp : ApplicationContext
         if (dialog.ShowDialog() == DialogResult.OK) SetRecordingPadding((int)value.Value);
     }
 
-    private bool RecordFrameByName(string? name)
+    /// <summary>The named emulator, or else the active, last used, remembered or only one.</summary>
+    private EmulatorSession? FindTarget(string? name)
     {
         EmulatorSession? target = name == null ? SessionForWindow(GetForegroundWindow()) :
             _sessions.Values.FirstOrDefault(session => string.Equals(session.Title, name, StringComparison.OrdinalIgnoreCase));
@@ -493,6 +544,12 @@ internal sealed class TrayApp : ApplicationContext
         if (name == null && target == null && Config.LastActiveEmulator is { } saved)
             target = _sessions.Values.FirstOrDefault(session => string.Equals(session.Title, saved, StringComparison.OrdinalIgnoreCase));
         if (name == null && target == null && _sessions.Count == 1) target = _sessions.Values.First();
+        return target;
+    }
+
+    private bool RecordFrameByName(string? name)
+    {
+        var target = FindTarget(name);
         if (target == null)
         {
             Log.Write($"Frame recording: emulator '{name ?? "active"}' not found");
@@ -500,6 +557,21 @@ internal sealed class TrayApp : ApplicationContext
         }
         RememberEmulator(target);
         return RecordFrame(target);
+    }
+
+    /// <summary>Fold (outer display), unfold (inner display), or with no pose switch to the other one.</summary>
+    private bool SetDuoPoseByName(string? name, DuoPose? pose)
+    {
+        var target = FindTarget(name);
+        if (target == null)
+        {
+            Log.Write($"iPhone Duo: emulator '{name ?? "active"}' not found");
+            Notify(name == null ? "Select a MuMu emulator before folding or unfolding." : $"No running emulator named {name}.", warning: true);
+            return false;
+        }
+        RememberEmulator(target);
+        Log.Write($"iPhone Duo {(pose?.ToString() ?? "toggle")} on '{target.Title}'");
+        return pose is { } p ? target.SetDuoPose(p) : target.ToggleDuoPose();
     }
 
     private bool RecordFrame(EmulatorSession session)
@@ -626,7 +698,7 @@ internal sealed class TrayApp : ApplicationContext
         _tray.ShowBalloonTip(6000, "MuMu Device Frames", text, warning ? ToolTipIcon.Warning : ToolTipIcon.Info);
 
     /// <summary>Category ▸ Model ▸ Variant, with a fit hint per model when the emulator picture size is known.</summary>
-    private void AddFrameTree(ToolStripItemCollection items, string? selectedKey, Size? renderSize, Action<FrameInfo> choose)
+    private void AddFrameTree(ToolStripItemCollection items, string? selectedKey, Size? renderSize, Action<FrameInfo> choose, bool duoFits = false)
     {
         if (Library.Frames.Count == 0) items.Add(new MenuItem("No frames installed") { Enabled = false });
         foreach (var category in Library.Frames.GroupBy(f => f.Category))
@@ -636,7 +708,11 @@ internal sealed class TrayApp : ApplicationContext
             {
                 string? hint = null;
                 var tone = HintTone.Secondary;
-                if (renderSize is { Width: > 0 } size)
+                if (IPhoneDuo.IsDuo(model.First()))
+                {
+                    if (duoFits) (hint, tone) = ("Exact fit", HintTone.Good); // both poses are 1:1 on the Duo surface
+                }
+                else if (renderSize is { Width: > 0 } size)
                 {
                     double mismatch = model.First().Mismatch(size.Width, size.Height);
                     if (mismatch < 0.002) (hint, tone) = ("Exact fit", HintTone.Good);
@@ -664,6 +740,8 @@ internal sealed class TrayApp : ApplicationContext
     {
         Config.Instance(session.Title).Frame = key;
         Config.Save();
+        // Picking "Closed" or "Open" on an emulator set up as a Duo means folding or unfolding it.
+        if (session.IsDuoSurface && IPhoneDuo.PoseOf(Library.Find(key)) is { } pose && pose != session.Pose) session.SetDuoPose(pose);
         session.Sync();
     }
 
@@ -687,11 +765,13 @@ internal sealed class TrayApp : ApplicationContext
         Config.ShareXExecutable = fresh.ShareXExecutable;
         bool interactiveChanged = Config.BezelInteractive != fresh.BezelInteractive;
         Config.BezelInteractive = fresh.BezelInteractive;
-        if (Config.Hotkey != fresh.Hotkey || Config.ExpoReloadHotkey != fresh.ExpoReloadHotkey || Config.ExpoGearHotkey != fresh.ExpoGearHotkey)
+        if (Config.Hotkey != fresh.Hotkey || Config.ExpoReloadHotkey != fresh.ExpoReloadHotkey || Config.ExpoGearHotkey != fresh.ExpoGearHotkey
+            || Config.DuoHotkey != fresh.DuoHotkey)
         {
             Config.Hotkey = fresh.Hotkey;
             Config.ExpoReloadHotkey = fresh.ExpoReloadHotkey;
             Config.ExpoGearHotkey = fresh.ExpoGearHotkey;
+            Config.DuoHotkey = fresh.DuoHotkey;
             RegisterHotkeys();
         }
 
@@ -717,6 +797,7 @@ internal sealed class TrayApp : ApplicationContext
             case FramesHotkeyId: ToggleAll(); break;
             case ExpoReloadHotkeyId: RunExpoAction(ExpoAction.Reload); break;
             case ExpoGearHotkeyId: RunExpoAction(ExpoAction.ToggleGear); break;
+            case DuoHotkeyId: SetDuoPoseByName(null, null); break;
         }
     }
 
@@ -804,10 +885,11 @@ internal sealed class TrayApp : ApplicationContext
 
     private void RegisterHotkeys()
     {
-        foreach (int id in new[] { FramesHotkeyId, ExpoReloadHotkeyId, ExpoGearHotkeyId }) UnregisterHotKey(_window.Handle, id);
+        foreach (int id in HotkeyIds) UnregisterHotKey(_window.Handle, id);
         RegisterHotkey(FramesHotkeyId, Config.Hotkey);
         RegisterHotkey(ExpoReloadHotkeyId, Config.ExpoReloadHotkey);
         RegisterHotkey(ExpoGearHotkeyId, Config.ExpoGearHotkey);
+        RegisterHotkey(DuoHotkeyId, Config.DuoHotkey);
     }
 
     private void RegisterHotkey(int id, string binding)
@@ -886,7 +968,7 @@ internal sealed class TrayApp : ApplicationContext
     protected override void ExitThreadCore()
     {
         Shutdown();
-        foreach (int id in new[] { FramesHotkeyId, ExpoReloadHotkeyId, ExpoGearHotkeyId }) UnregisterHotKey(_window.Handle, id);
+        foreach (int id in HotkeyIds) UnregisterHotKey(_window.Handle, id);
         _tray.Visible = false;
         _tray.Dispose();
         _icon?.Dispose();
@@ -912,7 +994,16 @@ internal sealed class TrayApp : ApplicationContext
             result != IntPtr.Zero;
     }
 
-    public static bool RequestFrameRecordingOfRunningInstance(string? name)
+    public static bool RequestFrameRecordingOfRunningInstance(string? name) => SendToRunningInstance(HiddenWindow.RecordFrameData, name);
+
+    /// <summary>Folds or unfolds the iPhone Duo in the named (or active) emulator of the running tray app.</summary>
+    public static bool RequestDuoPoseOfRunningInstance(DuoPose pose, string? name) =>
+        SendToRunningInstance(pose == DuoPose.Folded ? HiddenWindow.DuoFoldData : HiddenWindow.DuoUnfoldData, name);
+
+    /// <summary>True when the tray app is running (so commands go through it and its frames follow).</summary>
+    public static bool IsRunning => FindWindowW(null, HiddenWindow.WindowCaption) != IntPtr.Zero;
+
+    private static bool SendToRunningInstance(int dataId, string? name)
     {
         IntPtr hwnd = FindWindowW(null, HiddenWindow.WindowCaption);
         if (hwnd == IntPtr.Zero || name is { Length: > 200 }) return false;
@@ -920,7 +1011,7 @@ internal sealed class TrayApp : ApplicationContext
         IntPtr message = IntPtr.Zero;
         try
         {
-            var payload = new COPYDATASTRUCT { DataId = (IntPtr)1, ByteCount = ((name?.Length ?? 0) + 1) * sizeof(char), Data = data };
+            var payload = new COPYDATASTRUCT { DataId = dataId, ByteCount = ((name?.Length ?? 0) + 1) * sizeof(char), Data = data };
             message = System.Runtime.InteropServices.Marshal.AllocHGlobal(System.Runtime.InteropServices.Marshal.SizeOf<COPYDATASTRUCT>());
             System.Runtime.InteropServices.Marshal.StructureToPtr(payload, message, false);
             return SendMessageTimeoutW(hwnd, WM_COPYDATA, IntPtr.Zero, message, SMTO_ABORTIFHUNG, 5000, out var result) != IntPtr.Zero && result != IntPtr.Zero;
@@ -938,17 +1029,22 @@ internal sealed class TrayApp : ApplicationContext
         public const string WindowCaption = "MuMuDeviceFramesHost";
         public const int WM_EXIT_REQUEST = 0x8000 + 1; // WM_APP + 1, posted by "MuMuDeviceFrames.exe --exit"
         public const int WM_EXPO_RELOAD = 0x8000 + 2, WM_EXPO_GEAR = 0x8000 + 3;
+        /// <summary>WM_COPYDATA kinds; the payload is an emulator name (empty for the active one).</summary>
+        public const int RecordFrameData = 1, DuoFoldData = 2, DuoUnfoldData = 3;
 
         private readonly Action<int> _onHotkey;
         private readonly Func<ExpoAction, bool> _onExpoAction;
         private readonly Func<string?, bool> _onRecordFrame;
+        private readonly Func<string?, DuoPose?, bool> _onDuoPose;
         private readonly Action _onExit;
 
-        public HiddenWindow(Action<int> onHotkey, Func<ExpoAction, bool> onExpoAction, Func<string?, bool> onRecordFrame, Action onExit)
+        public HiddenWindow(Action<int> onHotkey, Func<ExpoAction, bool> onExpoAction, Func<string?, bool> onRecordFrame,
+            Func<string?, DuoPose?, bool> onDuoPose, Action onExit)
         {
             _onHotkey = onHotkey;
             _onExpoAction = onExpoAction;
             _onRecordFrame = onRecordFrame;
+            _onDuoPose = onDuoPose;
             _onExit = onExit;
             CreateHandle(new CreateParams { Caption = WindowCaption, Style = unchecked((int)WS_POPUP), ExStyle = (int)WS_EX_TOOLWINDOW });
         }
@@ -962,10 +1058,13 @@ internal sealed class TrayApp : ApplicationContext
             if (m.Msg == WM_COPYDATA && m.LParam != IntPtr.Zero)
             {
                 var data = System.Runtime.InteropServices.Marshal.PtrToStructure<COPYDATASTRUCT>(m.LParam);
-                if (data.DataId == (IntPtr)1 && data.Data != IntPtr.Zero && data.ByteCount is >= 2 and <= 402 && data.ByteCount % 2 == 0)
+                if (data.DataId is RecordFrameData or DuoFoldData or DuoUnfoldData && data.Data != IntPtr.Zero && data.ByteCount is >= 2 and <= 402 && data.ByteCount % 2 == 0)
                 {
                     string? name = System.Runtime.InteropServices.Marshal.PtrToStringUni(data.Data, data.ByteCount / 2 - 1);
-                    m.Result = _onRecordFrame(string.IsNullOrWhiteSpace(name) ? null : name) ? (IntPtr)1 : IntPtr.Zero;
+                    if (string.IsNullOrWhiteSpace(name)) name = null;
+                    bool ok = data.DataId == RecordFrameData ? _onRecordFrame(name)
+                        : _onDuoPose(name, data.DataId == DuoFoldData ? DuoPose.Folded : DuoPose.Open);
+                    m.Result = ok ? (IntPtr)1 : IntPtr.Zero;
                 }
                 return;
             }

@@ -27,6 +27,9 @@ was nothing like it.
   or a chat window.
 - **145 frames** from the open [device-frames-media](https://github.com/jonnyjackson26/device-frames-media) set —
   iPhone 6s to 17 Pro Max, iPhone Air, Pixel 8/9, Galaxy S21, iPads, Apple Watch — downloaded on first run.
+- **iPhone Duo, folding live.** Closed and open frames for Apple's foldable, drawn by the app itself, and a fold /
+  unfold switch that changes the emulator between the two displays in under a second, with no restart. See
+  [iPhone Duo](#iphone-duo).
 
 - **iOS-style status bar (optional).** Hides Android's clock and icons and draws an iPhone status bar in their place:
   bold time, cellular bars, Wi-Fi and battery, centred on the island and switching between black and white with
@@ -79,6 +82,7 @@ For the Android matching (status bar/cutout) the tool needs the Android SDK buil
 | `Ctrl+Alt+F` | All frames off / on (off = emulators look exactly like stock MuMu) |
 | `Ctrl+Alt+R` | Reload the Expo app in the active or last active emulator |
 | `Ctrl+Alt+G` | Show or hide Expo's floating gear in that emulator |
+| `Ctrl+Alt+D` | Fold or unfold the iPhone Duo in that emulator (see [iPhone Duo](#iphone-duo)) |
 | Tray icon | Same menus for every emulator, default frame, frame download, Start with Windows, exit |
 
 The Expo actions are also in each emulator's bezel and tray menus. They work when an Expo development app is in front
@@ -151,6 +155,53 @@ through `AndroidSdk` in config, `ANDROID_HOME`, `ANDROID_SDK_ROOT`, or `%LOCALAP
 Android Studio's SDK Manager can install the SDK components. To remove overlays by hand:
 `adb uninstall com.justsuperhuman.deviceframes.systemui` and `…deviceframes.cutout`.
 
+### iPhone Duo
+
+Apple's foldable has two displays: closed, the outer 1398 × 2034 display (466 × 678 pt, portrait, hinge on the left);
+open, the inner 2670 × 1878 display (890 × 626 pt, landscape). MuMu cannot change resolution without a restart, so the
+emulator runs at the bounding box of both, **2670 × 2034 at 480 dpi**, and Android's `wm size` picks the display.
+Each display shares one side with that surface, so Android draws it at exactly 1:1 (no scaling), centred, with black
+bars where the other display would be: folded at x 636 of the surface, open at y 78. Apps see 466 × 678 dp folded and
+890 × 626 dp open, and the switch is live, like folding a real phone.
+
+Setting an emulator up: choose **Frame ▸ Apple iPhone ▸ iPhone Duo ▸ Closed** (or Open), then **Android display ▸
+Set up as iPhone Duo…**, which writes 2670 × 2034 at 480 dpi into MuMu's settings and restarts that emulator once.
+From MuMu's CLI that is
+`MuMuManager.exe setting -v N -k resolution_mode -val custom -k resolution_width.custom -val 2670 -k resolution_height.custom -val 2034 -k resolution_dpi.custom -val 480`.
+An emulator in a Duo pose gets the Duo frame for that pose automatically.
+
+| Fold / unfold | |
+| --- | --- |
+| Bezel or tray menu | **Fold (outer display)** / **Unfold (inner display)**; picking Closed or Open in the Frame menu does the same |
+| `Ctrl+Alt+D` | Toggles the active or last used emulator (`DuoHotkey` in the config) |
+| `MuMuDeviceFrames.exe --duo-fold [emulator]` / `--duo-unfold [emulator]` | Through the running tray app, so the frame follows. Without it, a named emulator is switched over adb directly |
+
+A switch runs the `wm` commands over adb, swaps the closed and open frames, and moves the window clip and the frame to
+the part of MuMu's window the new display uses. The tray app reads `wm size` when it attaches and every few seconds
+after, so a restart, or a `wm size` from a script, still ends up with the right frame. **Save** and **Copy** take the
+screenshot inside Android, and its size decides the frame: the 1398 × 2034 or 2670 × 1878 picture goes into the
+matching frame pixel for pixel.
+
+The commands, if you want them in a script: MuMu reports a landscape resolution as a portrait panel turned 90°, and
+`wm size` takes the panel's own orientation, so the sizes are swapped. Rotation is pinned so a portrait-only app cannot
+turn the display (and MuMu's window) round.
+
+```
+adb shell "wm fixed-to-user-rotation enabled; wm user-rotation lock 1; wm size 2034x1398; wm density 480"   # fold
+adb shell "wm fixed-to-user-rotation enabled; wm user-rotation lock 1; wm size 1878x2670; wm density 480"   # unfold
+```
+
+The frames are drawn by the app on first run (`%APPDATA%\MuMuDeviceFrames\builtin-frames`, in the same
+frame/mask/template format as the downloaded set) and need no download. Closed: titanium rim with a lit edge, thin
+black border, small corners on the hinge side and large ones on the opening side, and the hinge barrel on the left.
+Open: rounded on all four corners, with a faint crease down the middle of the screen. The crease is a separate
+`glass.png` layer, shown in a click-through window, so taps along the middle still reach the app.
+`MuMuDeviceFrames.exe --duo-frames <folder>` writes both frames to a folder.
+
+The Duo leaves the status bar to the app: the JustGains app hides Android's status bar on these sizes and draws the
+time, status and front camera in its own rail. So a Duo frame never installs the cutout overlays or draws the
+iOS-style status bar, whatever those switches say. The camera is not part of the frame.
+
 ## Configuration
 
 `%APPDATA%\MuMuDeviceFrames\config.json` (tray ▸ *Open config folder*, then *Reload frames and config*). Frame choices
@@ -166,6 +217,7 @@ and the Android-matching switch are stored per emulator name. `log.txt` is next 
 | `Hotkey` | `Ctrl+Alt+F` | |
 | `ExpoReloadHotkey` | `Ctrl+Alt+R` | Reload the Expo app in the active or last active emulator; empty string disables it. |
 | `ExpoGearHotkey` | `Ctrl+Alt+G` | Show or hide Expo's floating gear there; empty string disables it. |
+| `DuoHotkey` | `Ctrl+Alt+D` | Fold or unfold the iPhone Duo in the active or last active emulator; empty string disables it. |
 | `LastActiveEmulator` | `null` | Last emulator used for Expo hotkeys when another app is in front. Updated automatically. |
 | `RecordingPadding` | `15` | Pixels to capture around every side of the full frame, from 0 to 500. |
 | `ShareXExecutable` | `null` | Optional path to a compatible ShareX.exe outside the usual install folders. |
@@ -180,7 +232,9 @@ Command line: `--exit` (quit the running instance cleanly) · `--expo-reload [em
 the app was killed — starting it again does the same) · `--download [folder]` (fetch the frame set) ·
 `--screenshot <emulator> <out.png> [frame] [transparent|checker|#RRGGBB]` (framed screenshot at native resolution) ·
 `--snapshot <emulator> <out.png> [frame|-] [background]` (composite of the window and the frame, for checking
-alignment) · `--render <frame> <w> <h> <out.png>` · `--cutout-spec <frame> <w> <h> <dpi>`.
+alignment) · `--render <frame> <w> <h> <out.png>` · `--cutout-spec <frame> <w> <h> <dpi>` ·
+`--duo-fold [emulator]` / `--duo-unfold [emulator]` (iPhone Duo outer or inner display) · `--duo-frames <folder>` (draw
+the two iPhone Duo frames into a folder).
 
 ## How it works
 
@@ -233,7 +287,8 @@ dotnet run --project tests/AndroidTools.Tests.csproj -c Release
 ## Credits
 
 - Frame images: [device-frames-media](https://github.com/jonnyjackson26/device-frames-media) by Jonny Jackson. They
-  are downloaded from that project at first run, not bundled here.
+  are downloaded from that project at first run, not bundled here. The iPhone Duo frames are drawn by this app
+  (`src/DuoFrames.cs`).
 - Written for [JustGains](https://justgains.com), the workout and nutrition app in the screenshots.
 
 MIT — see [LICENSE](LICENSE).

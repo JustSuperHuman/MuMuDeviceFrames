@@ -66,11 +66,18 @@ internal static class Diagnostics
             GetWindowRect(render, out var rr);
 
             var library = FrameLibrary.Load(config.FramesRoot);
-            var frame = library.Find(frameKey) ?? library.Find(config.Instance(title).Frame) ?? library.Find(config.DefaultFrame) ?? library.BestMatch(rr.Width, rr.Height);
+            var renderSize = new Size(rr.Width, rr.Height);
+            var chosen = library.Find(frameKey) ?? library.Find(config.Instance(title).Frame);
+            // iPhone Duo: Android's pose decides the frame and which part of the surface is the picture.
+            DuoPose? pose = IPhoneDuo.IsDuo(chosen) || IPhoneDuo.LooksLikeSurface(renderSize) ? QueryPose(title) : null;
+            if (pose is { } posed && (chosen == null || IPhoneDuo.IsDuo(chosen))) chosen = library.Find(IPhoneDuo.FrameKey(posed)) ?? chosen;
+            var frame = chosen ?? library.Find(config.DefaultFrame) ?? library.BestMatch(rr.Width, rr.Height);
             if (frame == null) { Log.Write("Snapshot: no frame available"); return 3; }
+            var picture = new Rectangle(0, 0, rr.Width, rr.Height);
+            if (IPhoneDuo.IsDuo(frame) && pose is { } shown && IPhoneDuo.PictureInRender(shown, renderSize) is { } part) picture = part;
 
             var sw = Stopwatch.StartNew();
-            var rendered = FrameRenderer.Render(frame, new RenderKey(frame.Key, rr.Width, rr.Height, Math.Clamp(config.Overlap, 0, 8)));
+            var rendered = FrameRenderer.Render(frame, new RenderKey(frame.Key, picture.Width, picture.Height, Math.Clamp(config.Overlap, 0, 8)));
             long renderMs = sw.ElapsedMilliseconds;
 
             using var window = PrintEmulator(main, wr);
@@ -97,7 +104,7 @@ internal static class Diagnostics
 
             // Emulator pixels, only where the clip region lets them through.
             var data = window.LockBits(new Rectangle(0, 0, wr.Width, wr.Height), ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
-            int offX = rr.Left - wr.Left, offY = rr.Top - wr.Top;
+            int offX = rr.Left - wr.Left + picture.X, offY = rr.Top - wr.Top + picture.Y;
             foreach (var (ry, x0, x1) in rendered.ScreenRuns)
             {
                 for (int rx = x0; rx < x1; rx++)
@@ -110,6 +117,21 @@ internal static class Diagnostics
                 }
             }
             window.UnlockBits(data);
+
+            // Glass layer over the picture (its own click-through window on the desktop).
+            if (rendered.Glass is { } glass)
+            {
+                for (int y = 0; y < glass.Bounds.Height; y++)
+                {
+                    for (int x = 0; x < glass.Bounds.Width; x++)
+                    {
+                        int s = (y * glass.Bounds.Width + x) * 4, a = glass.Pixels[s + 3];
+                        if (a == 0) continue;
+                        int p2 = ((margin + glass.Bounds.Y + y) * width + margin + glass.Bounds.X + x) * 4;
+                        for (int c = 0; c < 4; c++) canvas[p2 + c] = (byte)(glass.Pixels[s + c] + canvas[p2 + c] * (255 - a) / 255);
+                    }
+                }
+            }
 
             // Frame on top (premultiplied source-over).
             for (int y = 0; y < rendered.Height; y++)
@@ -127,7 +149,7 @@ internal static class Diagnostics
 
             SavePremultiplied(canvas, width, height, outPath);
 
-            Log.Write($"Snapshot '{title}' with {frame.Key}: picture {rr.Width}x{rr.Height}, overlay {rendered.Width}x{rendered.Height}, " +
+            Log.Write($"Snapshot '{title}' with {frame.Key}: surface {rr.Width}x{rr.Height}, picture {picture}, overlay {rendered.Width}x{rendered.Height}, " +
                       $"offset {rendered.RenderOffset}, {(rendered.Stretched ? "exact fit" : "cropped fit")}, render {renderMs} ms -> {outPath}");
             return 0;
         }
@@ -190,13 +212,16 @@ internal static class Diagnostics
             if (instance == null) { Log.Write($"Screenshot: no running MuMu instance named '{title}'"); return 2; }
             var display = MuMuControl.QueryDisplay(instance);
             var library = FrameLibrary.Load(config.FramesRoot);
-            var frame = library.Find(frameKey) ?? library.Find(config.Instance(title).Frame) ?? library.Find(config.DefaultFrame)
+            var chosen = library.Find(frameKey) ?? library.Find(config.Instance(title).Frame);
+            if (IPhoneDuo.Detect(display) is { } pose && (chosen == null || IPhoneDuo.IsDuo(chosen))) chosen = library.Find(IPhoneDuo.FrameKey(pose)) ?? chosen;
+            var frame = chosen ?? library.Find(config.DefaultFrame)
                         ?? (display == null ? null : library.BestMatch(display.Native.Width, display.Native.Height));
             if (frame == null) { Log.Write("Screenshot: no frame available"); return 3; }
 
-            // With the iOS-style bar on, Android's own is empty; draw ours the way the overlay does.
+            // With the iOS-style bar on, Android's own is empty; draw ours the way the overlay does. Never on the
+            // iPhone Duo, whose app draws its own rail.
             FramedScreenshot.StatusBar? bar = null;
-            if (config.IosStatusBarFor(title) && display != null && AndroidStatusBar.IsHidden(instance)
+            if (!IPhoneDuo.IsDuo(frame) && config.IosStatusBarFor(title) && display != null && AndroidStatusBar.IsHidden(instance)
                 && AndroidCutout.Measure(frame, display, config.StatusBarPaddingFactor) is { } spec)
                 bar = new FramedScreenshot.StatusBar(StatusBarLayout.From(spec, display), AndroidStatusBar.WantsDarkGlyphs(instance),
                     IosStatusBar.ClockText(config.StatusBarClock), IosStatusBar.Family(config.StatusBarFont));
@@ -210,6 +235,13 @@ internal static class Diagnostics
             Log.Write($"Screenshot failed: {ex}");
             return 1;
         }
+    }
+
+    /// <summary>The iPhone Duo pose of a running emulator, asked over adb; null when it is not in one.</summary>
+    private static DuoPose? QueryPose(string title)
+    {
+        var instance = MuMuControl.LocateByName(title);
+        return instance == null ? null : IPhoneDuo.Detect(MuMuControl.QueryDisplay(instance));
     }
 
     internal static void SavePremultiplied(byte[] canvas, int width, int height, string outPath)

@@ -80,7 +80,8 @@ internal sealed record MuMuInstance(string Index, string ManagerPath, string Adb
     }
 }
 
-internal sealed record AndroidDisplay(Size Native, int Density);
+/// <param name="Override">The <c>wm size</c> override, when one is set (the iPhone Duo poses use it).</param>
+internal sealed record AndroidDisplay(Size Native, int Density, Size? Override = null);
 
 internal static class MuMuControl
 {
@@ -177,10 +178,12 @@ internal static class MuMuControl
 
     public static AndroidDisplay? QueryDisplay(MuMuInstance instance)
     {
-        var size = Regex.Match(instance.Shell("wm size").Output, @"Physical size:\s*(\d+)x(\d+)");
+        string wmSize = instance.Shell("wm size").Output;
+        var size = Regex.Match(wmSize, @"Physical size:\s*(\d+)x(\d+)");
         var density = Regex.Match(instance.Shell("wm density").Output, @"Physical density:\s*(\d+)");
         if (!size.Success || !density.Success) return null;
-        return new AndroidDisplay(new Size(int.Parse(size.Groups[1].Value), int.Parse(size.Groups[2].Value)), int.Parse(density.Groups[1].Value));
+        return new AndroidDisplay(new Size(int.Parse(size.Groups[1].Value), int.Parse(size.Groups[2].Value)), int.Parse(density.Groups[1].Value),
+            IPhoneDuo.ParseSize(wmSize, "Override size"));
     }
 
     /// <summary>Writes a custom resolution into the instance's MuMu settings. Takes effect on the next emulator start.</summary>

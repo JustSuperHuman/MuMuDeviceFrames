@@ -29,6 +29,8 @@ internal sealed class AppConfig
 
     [JsonIgnore] public static string DefaultFramesRoot => Path.Combine(Dir, "frames");
     [JsonIgnore] public static string PortableFramesRoot => Path.Combine(AppContext.BaseDirectory, "device-frames-output");
+    /// <summary>Frames this app draws itself (iPhone Duo), kept apart from the downloaded set.</summary>
+    [JsonIgnore] public static string BuiltInFramesRoot => Path.Combine(Dir, "builtin-frames");
 
     /// <summary>Frame used by emulators without their own choice. Null = best aspect-ratio match.</summary>
     public string? DefaultFrame { get; set; }
@@ -52,6 +54,9 @@ internal sealed class AppConfig
 
     /// <summary>Shows or hides Expo's floating tools button in the last active emulator. Empty disables the hotkey.</summary>
     public string ExpoGearHotkey { get; set; } = "Ctrl+Alt+G";
+
+    /// <summary>Folds or unfolds the iPhone Duo in the active or last active emulator. Empty disables the hotkey.</summary>
+    public string DuoHotkey { get; set; } = "Ctrl+Alt+D";
 
     /// <summary>Last emulator brought to the front, used when an Expo hotkey runs from another app.</summary>
     public string? LastActiveEmulator { get; set; }

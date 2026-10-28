@@ -35,8 +35,8 @@ internal sealed class OverlayWindow : NativeWindow
         });
     }
 
-    /// <summary>A second owned window (the status-bar band) that moves together with this one while dragging.</summary>
-    public OverlayWindow? Companion { get; set; }
+    /// <summary>Other owned windows (the status-bar band, the glass layer) that move together with this one while dragging.</summary>
+    public OverlayWindow?[] Companions { get; set; } = [];
 
     public void SetFrame(RenderedFrame frame, Point position) => SetBitmap(frame.Pixels, frame.Width, frame.Height, position);
 
@@ -145,22 +145,23 @@ internal sealed class OverlayWindow : NativeWindow
         var overlayPos = new Point(_dragOverlay.X + dx, _dragOverlay.Y + dy);
         if (overlayPos == _position) return;
 
-        var companion = Companion is { IsAlive: true } c ? c : null;
-        var companionPos = companion == null ? Point.Empty : new Point(companion.Position.X + (overlayPos.X - _position.X), companion.Position.Y + (overlayPos.Y - _position.Y));
+        var companions = Companions.Where(c => c is { IsAlive: true }).Select(c => (Window: c!,
+            Position: new Point(c!.Position.X + (overlayPos.X - _position.X), c.Position.Y + (overlayPos.Y - _position.Y)))).ToList();
 
         const uint flags = SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER;
-        IntPtr batch = BeginDeferWindowPos(3);
+        IntPtr batch = BeginDeferWindowPos(2 + companions.Count);
         if (batch != IntPtr.Zero) batch = DeferWindowPos(batch, _emulator, IntPtr.Zero, _dragEmulator.X + dx, _dragEmulator.Y + dy, 0, 0, flags);
         if (batch != IntPtr.Zero) batch = DeferWindowPos(batch, Handle, IntPtr.Zero, overlayPos.X, overlayPos.Y, 0, 0, flags);
-        if (batch != IntPtr.Zero && companion != null) batch = DeferWindowPos(batch, companion.Handle, IntPtr.Zero, companionPos.X, companionPos.Y, 0, 0, flags);
+        foreach (var (window, position) in companions)
+            if (batch != IntPtr.Zero) batch = DeferWindowPos(batch, window.Handle, IntPtr.Zero, position.X, position.Y, 0, 0, flags);
         if (batch == IntPtr.Zero || !EndDeferWindowPos(batch))
         {
             SetWindowPos(_emulator, IntPtr.Zero, _dragEmulator.X + dx, _dragEmulator.Y + dy, 0, 0, flags);
             SetWindowPos(Handle, IntPtr.Zero, overlayPos.X, overlayPos.Y, 0, 0, flags);
-            if (companion != null) SetWindowPos(companion.Handle, IntPtr.Zero, companionPos.X, companionPos.Y, 0, 0, flags);
+            foreach (var (window, position) in companions) SetWindowPos(window.Handle, IntPtr.Zero, position.X, position.Y, 0, 0, flags);
         }
         _position = overlayPos;
-        companion?.NotifyMoved(companionPos);
+        foreach (var (window, position) in companions) window.NotifyMoved(position);
     }
 
     internal void NotifyMoved(Point position) => _position = position;
