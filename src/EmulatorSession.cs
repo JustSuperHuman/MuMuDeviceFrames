@@ -368,13 +368,31 @@ internal sealed class EmulatorSession : IDisposable
     /// <summary>Light or dark glyphs, as the app in front asks (the iOS bar polls this itself when it runs).</summary>
     private void PollChromeTheme()
     {
-        if (_chromePolling || _barApplied || Instance is not { } instance) return;
+        if (_chromePolling || _barApplied || CurrentChrome() is not { } state || !GetWindowRect(Main, out var wr)) return;
+        // What is behind the time and ring decides, as on iOS: MuMu's own picture there (PrintWindow sees it whatever
+        // covers the window), its median brightness.
+        if (IosChrome.GlyphArea(state) is not { } area || _pictureOnScreen.Width <= 0) return;
+        float scale = (float)_pictureOnScreen.Width / state.Screen.Width;
+        var sample = new Rectangle(_pictureOnScreen.X - wr.Left + (int)(area.X * scale), _pictureOnScreen.Y - wr.Top + (int)(area.Y * scale),
+            Math.Max(1, (int)(area.Width * scale)), Math.Max(1, (int)(area.Height * scale)));
         _chromePolling = true;
+        var main = Main;
         Task.Run(() =>
         {
-            bool dark = false;
-            try { dark = AndroidStatusBar.WantsDarkGlyphs(instance); } catch { /* keep the last answer */ }
-            _app.Post(() => { _chromePolling = false; _chromeDark = dark; });
+            bool? dark = null;
+            try
+            {
+                using var shot = Diagnostics.PrintEmulator(main, wr);
+                dark = IosChrome.IsLight(shot, sample);
+            }
+            catch { /* keep the last answer */ }
+            _app.Post(() =>
+            {
+                _chromePolling = false;
+                if (dark is not { } d || d == _chromeDark) return;
+                _chromeDark = d;
+                EnsureChrome();
+            });
         });
     }
 

@@ -44,6 +44,51 @@ internal static class IosChrome
     /// <summary>The trailing safe area of the rail, as Apple's renders show it (Mail's content ends 84 pt in).</summary>
     public const int RailPt = 84;
 
+    /// <summary>
+    /// Where the time and ring sit, in the screen's native pixels: the content behind them decides light or dark
+    /// glyphs, as on iOS. Null when there is nothing to draw.
+    /// </summary>
+    public static Rectangle? GlyphArea(ChromeState state)
+    {
+        var element = state.Kind switch
+        {
+            ChromeKind.DuoRailClosed => Closed,
+            ChromeKind.DuoRailOpen => Open,
+            ChromeKind.DuoCorner => Corner,
+            _ => null,
+        };
+        if (element == null) return null;
+        float px = state.Density / 160f, ring = (RingDots + DotDiameter) * element.Scale;
+        // Rail: the column from the time's top to the ring's dots; corner: the row from the time's leading edge.
+        float left = element.TimeGap > 0 ? element.RingX + ring + element.TimeGap + 40 : Math.Max(element.TimeX, element.RingX) + ring;
+        float right = element.RingX - ring, top = Math.Min(element.TimeY - 12, element.RingY - ring), bottom = element.RingY + ring;
+        return Rectangle.FromLTRB((int)(state.Screen.Width - left * px), (int)(top * px), (int)(state.Screen.Width - right * px), (int)(bottom * px));
+    }
+
+    /// <summary>True when the content in a 32-bit ARGB bitmap's <paramref name="area"/> is light (dark glyphs on it).</summary>
+    public static bool IsLight(Bitmap picture, Rectangle area)
+    {
+        area.Intersect(new Rectangle(0, 0, picture.Width, picture.Height));
+        if (area.Width <= 0 || area.Height <= 0) return false;
+        var data = picture.LockBits(area, System.Drawing.Imaging.ImageLockMode.ReadOnly, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+        try
+        {
+            var lums = new List<int>();
+            for (int y = 0; y < area.Height; y += 2)
+                for (int x = 0; x < area.Width; x += 2)
+                {
+                    int c = System.Runtime.InteropServices.Marshal.ReadInt32(data.Scan0, y * data.Stride + x * 4);
+                    lums.Add((((c >> 16) & 255) * 299 + ((c >> 8) & 255) * 587 + (c & 255) * 114) / 1000);
+                }
+            lums.Sort();
+            return lums.Count > 0 && lums[lums.Count / 2] > 140; // the median: the app's background, not its text
+        }
+        finally
+        {
+            picture.UnlockBits(data);
+        }
+    }
+
     /// <summary>The Duo's chrome for a pose (none for other frames).</summary>
     public static ChromeKind KindFor(FrameInfo? frame, DuoPose? pose) => !IPhoneDuo.IsDuo(frame) ? ChromeKind.None : pose switch
     {

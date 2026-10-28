@@ -303,6 +303,10 @@ it. A second window is needed either way — and with one, nothing has to run in
 - Frame variants with baked-in shadows take mouse input on the shadow too (any pixel with alpha).
 - Windows only; MuMu Player 12 (`MuMuNxDevice.exe`) is what it was written against. Older MuMu builds are matched by
   process name and the same `nemuwin` render surface, untested.
+- MuMu's own store app (`com.mumu.store`) puts full-screen ad overlays over whatever is running, which spoils
+  recordings and framed screenshots. On an emulator kept for testing you can switch it off with
+  `adb shell pm disable-user --user 0 com.mumu.store` (and back on with `pm enable`); nothing else on the emulator
+  depends on it. This app does not do that for you.
 
 ## Build
 
