@@ -2,14 +2,24 @@ using System.Text.RegularExpressions;
 
 namespace MuMuDeviceFrames;
 
-/// <summary>Which of the iPhone Duo's two displays is in use.</summary>
-internal enum DuoPose { Folded, Open }
+/// <summary>How the iPhone Duo is held: closed (outer display), open flat or half open like a book (inner display).</summary>
+internal enum DuoPose { Folded, Open, HalfOpen }
+
+/// <summary>
+/// What a Duo emulator's Android reports beyond <c>wm size</c>: the size apps see now (rotation included), and, once it
+/// has been made a foldable, its device state (0 closed, 1 half open, 2 open) and whether the postures overlay is on.
+/// </summary>
+internal sealed record DuoDevice(Size? Current, bool Foldable, int? FoldState, bool Postures);
 
 /// <summary>
 /// iPhone Duo on a MuMu emulator. The emulator runs at the bounding box of both displays (2670 × 2034 at 480 dpi) and
 /// Android's <c>wm size</c> switches between them live: the closed phone's 1398 × 2034 outer display or the open
 /// phone's 2670 × 1878 inner one. Each shares one side with the bounding box, so Android draws it at exactly 1:1,
-/// centred on MuMu's render surface with black bars around it. Everything here is pure geometry and text.
+/// centred on MuMu's render surface with black bars around it.
+///
+/// Made a foldable (see <see cref="DuoSetup"/>), Android also has the device states CLOSED, HALF_OPENED and OPENED, a
+/// postures overlay that maps them to Jetpack WindowManager's postures, and a fold line in <c>display_features</c>,
+/// so apps get a FoldingFeature the way they do on a Galaxy Z Fold. Everything here is pure geometry and text.
 /// </summary>
 internal static class IPhoneDuo
 {
@@ -20,33 +30,55 @@ internal static class IPhoneDuo
     public static readonly Size Surface = new(2670, 2034);
     /// <summary>Closed: the outer display, portrait, hinge on the left.</summary>
     public static readonly Size OuterScreen = new(1398, 2034);
-    /// <summary>Open: the inner display, landscape.</summary>
+    /// <summary>Open or half open: the inner display, landscape.</summary>
     public static readonly Size InnerScreen = new(2670, 1878);
 
-    public static Size ScreenSize(DuoPose pose) => pose == DuoPose.Folded ? OuterScreen : InnerScreen;
-    public static string Variant(DuoPose pose) => pose == DuoPose.Folded ? "Closed" : "Open";
+    public static bool IsInner(DuoPose pose) => pose != DuoPose.Folded;
+    public static Size ScreenSize(DuoPose pose) => IsInner(pose) ? InnerScreen : OuterScreen;
+    public static string Variant(DuoPose pose) => pose switch { DuoPose.Folded => "Closed", DuoPose.HalfOpen => "Half open", _ => "Open" };
     public static string FrameKey(DuoPose pose) => $"{Category}/{Model}/{Variant(pose)}";
-    public static DuoPose Other(DuoPose pose) => pose == DuoPose.Folded ? DuoPose.Open : DuoPose.Folded;
+
+    /// <summary>Android device state for a pose, as defined in <see cref="DeviceStateConfig"/>.</summary>
+    public static int StateFor(DuoPose pose) => pose switch { DuoPose.Folded => 0, DuoPose.HalfOpen => 1, _ => 2 };
+
+    /// <summary>Fold / unfold toggle: closed opens flat, anything open closes.</summary>
+    public static DuoPose Toggle(DuoPose? pose) => pose == DuoPose.Folded ? DuoPose.Open : DuoPose.Folded;
+    /// <summary>Book toggle: half open goes flat, anything else goes to half open.</summary>
+    public static DuoPose ToggleHalf(DuoPose? pose) => pose == DuoPose.HalfOpen ? DuoPose.Open : DuoPose.HalfOpen;
 
     public static bool IsDuo(FrameInfo? frame) => frame != null &&
         string.Equals(frame.Category, Category, StringComparison.OrdinalIgnoreCase) && string.Equals(frame.Model, Model, StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>The pose a Duo frame variant shows ("Closed" or "Open").</summary>
+    /// <summary>The pose a Duo frame variant shows ("Closed", "Open" or "Half open").</summary>
     public static DuoPose? PoseOf(FrameInfo? frame) => !IsDuo(frame) ? null
-        : string.Equals(frame!.Variant, Variant(DuoPose.Open), StringComparison.OrdinalIgnoreCase) ? DuoPose.Open : DuoPose.Folded;
+        : Enum.GetValues<DuoPose>().Cast<DuoPose?>().FirstOrDefault(p => string.Equals(frame!.Variant, Variant(p!.Value), StringComparison.OrdinalIgnoreCase)) ?? DuoPose.Folded;
 
-    /// <summary>The pose whose display has this size (a screenshot, say), in either orientation.</summary>
+    /// <summary>The display (outer: Folded, inner: Open) that has this size, a screenshot say, in either orientation.</summary>
     public static DuoPose? PoseForScreen(Size size) =>
         SameSize(size, OuterScreen) ? DuoPose.Folded : SameSize(size, InnerScreen) ? DuoPose.Open : null;
 
     /// <summary>True when Android's physical display is the Duo bounding box (MuMu reports it in either orientation).</summary>
     public static bool IsSurface(Size physical) => SameSize(physical, Surface);
 
-    /// <summary>The pose Android is in, from its physical display and <c>wm size</c> override; null when it is in neither.</summary>
-    public static DuoPose? Detect(Size physical, Size? overrideSize) =>
-        IsSurface(physical) && overrideSize is { } size ? PoseForScreen(size) : null;
+    /// <summary>
+    /// The pose Android is in: the display from the <c>wm size</c> override, and for the inner display the device state
+    /// tells half open (1) from open. Null when the emulator is in no Duo pose.
+    /// </summary>
+    public static DuoPose? Detect(Size physical, Size? overrideSize, int? foldState = null)
+    {
+        if (!IsSurface(physical) || overrideSize is not { } size || PoseForScreen(size) is not { } display) return null;
+        return display == DuoPose.Open && foldState == StateFor(DuoPose.HalfOpen) ? DuoPose.HalfOpen : display;
+    }
 
-    public static DuoPose? Detect(AndroidDisplay? display) => display == null ? null : Detect(display.Native, display.Override);
+    public static DuoPose? Detect(AndroidDisplay? display) => display == null ? null : Detect(display.Native, display.Override, display.Duo?.FoldState);
+
+    /// <summary>
+    /// True when everything a pose sets still holds: apps see the pose's display the right way round (MuMu turns the
+    /// display back after a restart, and sometimes when an app it remembers comes to the front), and a foldable is in
+    /// the pose's device state (a restart clears the state override). False means the pose commands should run again.
+    /// </summary>
+    public static bool InStep(DuoPose pose, AndroidDisplay? display) =>
+        display?.Duo is { } duo && duo.Current == ScreenSize(pose) && (!duo.Foldable || duo.FoldState == StateFor(pose));
 
     /// <summary>Pose from the output of <c>adb shell wm size</c> ("Physical size: …" and, once set, "Override size: …").</summary>
     public static DuoPose? ParsePose(string wmSizeOutput)
@@ -60,6 +92,103 @@ internal static class IPhoneDuo
         var match = Regex.Match(text, Regex.Escape(label) + @":\s*(\d+)x(\d+)");
         return match.Success ? new Size(int.Parse(match.Groups[1].Value), int.Parse(match.Groups[2].Value)) : null;
     }
+
+    // ---- Android foldable ---------------------------------------------------------------------------------------
+
+    /// <summary>The device states, for /data/system/devicestate/device_state_configuration.xml. No conditions: the
+    /// base state is CLOSED and the pose commands override it. No display properties, so no display switching.</summary>
+    public const string DeviceStateConfig =
+        """
+        <?xml version="1.0" encoding="utf-8"?>
+        <device-state-config>
+            <device-state>
+                <identifier>0</identifier>
+                <name>CLOSED</name>
+            </device-state>
+            <device-state>
+                <identifier>1</identifier>
+                <name>HALF_OPENED</name>
+            </device-state>
+            <device-state>
+                <identifier>2</identifier>
+                <name>OPENED</name>
+            </device-state>
+        </device-state-config>
+
+        """;
+
+    public const string PosturesOverlay = "com.justsuperhuman.deviceframes.foldable";
+
+    /// <summary>
+    /// <c>config_device_state_postures</c>: device state to Jetpack posture (1 no folding features, 2 half opened,
+    /// 3 flat). Closed reports no fold, like a closed Galaxy Z Fold whose outer display has none.
+    /// </summary>
+    public const string PosturesValues =
+        "    <string-array name=\"config_device_state_postures\" translatable=\"false\">\n" +
+        "        <item>0:1</item>\n        <item>1:2</item>\n        <item>2:3</item>\n" +
+        "    </string-array>\n";
+
+    /// <summary>
+    /// The fold for <c>Settings.Global display_features</c>: a line down the middle of the inner display, in the
+    /// display's natural orientation (on MuMu's turned panel that is a horizontal line across the portrait panel).
+    /// </summary>
+    public static string FoldFeature(Size physical)
+    {
+        int fold = InnerScreen.Width / 2, across = InnerScreen.Height;
+        return physical.Width < physical.Height ? $"fold-[0,{fold},{across},{fold}]" : $"fold-[{fold},0,{fold},{across}]";
+    }
+
+    /// <summary>
+    /// The shell commands that put an emulator in a pose. <c>wm size</c> takes the display's natural orientation, and
+    /// MuMu reports a landscape resolution as a portrait panel turned 90°, so sizes are swapped for it. Rotation is
+    /// pinned (and app orientation requests ignored for rotation) so a portrait-only app cannot turn the display round.
+    /// On a foldable the order matters: the fold is only ever reported while the window is the inner display's size
+    /// (Android's extensions throw in the app for a fold that does not span the window), so closing drops the device
+    /// state before shrinking and opening grows the display before setting the state.
+    /// </summary>
+    public static string[] Commands(DuoPose pose, Size physical, bool foldable = false)
+    {
+        bool turned = physical.Width < physical.Height;
+        var size = ScreenSize(pose);
+        var natural = turned ? new Size(size.Height, size.Width) : size;
+        string[] display =
+        [
+            "wm fixed-to-user-rotation enabled",
+            $"wm user-rotation lock {(turned ? 1 : 0)}",
+            $"wm size {natural.Width}x{natural.Height}",
+            $"wm density {Density}",
+        ];
+        if (!foldable) return display;
+        return IsInner(pose)
+            ? [.. display, $"settings put global display_features {FoldFeature(physical)}", $"cmd device_state state {StateFor(pose)}"]
+            : [$"cmd device_state state {StateFor(pose)}", "settings delete global display_features", .. display];
+    }
+
+    /// <summary>
+    /// One shell line for everything <see cref="DuoDevice"/> holds; <see cref="ParseDevice"/> reads its output.
+    /// </summary>
+    public const string DeviceQuery =
+        "dumpsys window displays | grep -m1 ' cur='; " +
+        "echo states:$(cmd device_state print-states-simple 2>/dev/null); " +
+        "echo state:$(cmd device_state print-state 2>/dev/null); " +
+        "echo postures:$(cmd overlay list android | grep -c 'x] " + PosturesOverlay + "')";
+
+    public static DuoDevice ParseDevice(string output)
+    {
+        var current = Regex.Match(output, @"\bcur=(\d+)x(\d+)");
+        var states = Regex.Match(output, @"^states:([\d,\s]*)$", RegexOptions.Multiline);
+        var ids = states.Success ? states.Groups[1].Value.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries) : [];
+        bool foldable = new[] { "0", "1", "2" }.All(ids.Contains);
+        var state = Regex.Match(output, @"^state:\s*(\d+)\s*$", RegexOptions.Multiline);
+        var postures = Regex.Match(output, @"^postures:\s*(\d+)", RegexOptions.Multiline);
+        return new DuoDevice(
+            current.Success ? new Size(int.Parse(current.Groups[1].Value), int.Parse(current.Groups[2].Value)) : null,
+            foldable,
+            foldable && state.Success ? int.Parse(state.Groups[1].Value) : null,
+            postures.Success && postures.Groups[1].Value != "0");
+    }
+
+    // ---- placement ----------------------------------------------------------------------------------------------
 
     /// <summary>
     /// Where Android puts a pose on the render surface (surface pixels, as seen). It centres a smaller logical display
@@ -83,25 +212,6 @@ internal static class IPhoneDuo
         int x0 = (int)Math.Round(p.Left * sx), x1 = (int)Math.Round(p.Right * sx);
         int y0 = (int)Math.Round(p.Top * sy), y1 = (int)Math.Round(p.Bottom * sy);
         return Rectangle.FromLTRB(x0, y0, x1, y1);
-    }
-
-    /// <summary>
-    /// The shell commands that put an emulator in a pose. <c>wm size</c> takes the display's natural orientation, and
-    /// MuMu reports a landscape resolution as a portrait panel turned 90°, so sizes are swapped for it. Rotation is
-    /// pinned (and app orientation requests ignored for rotation) so a portrait-only app cannot turn the display round.
-    /// </summary>
-    public static string[] Commands(DuoPose pose, Size physical)
-    {
-        bool turned = physical.Width < physical.Height;
-        var size = ScreenSize(pose);
-        var natural = turned ? new Size(size.Height, size.Width) : size;
-        return
-        [
-            "wm fixed-to-user-rotation enabled",
-            $"wm user-rotation lock {(turned ? 1 : 0)}",
-            $"wm size {natural.Width}x{natural.Height}",
-            $"wm density {Density}",
-        ];
     }
 
     /// <summary>True when an emulator window's picture has the Duo surface's aspect ratio (within 0.5 %).</summary>

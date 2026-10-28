@@ -121,16 +121,6 @@ internal static class AndroidCutout
     /// <param name="hideNotificationIcons">For the iOS-style bar: no notification icons next to where its time is drawn.</param>
     public static string? Apply(MuMuInstance instance, Spec spec, string? sdkRoot, bool hideNotificationIcons = false)
     {
-        var missing = AndroidTools.Missing(sdkRoot);
-        if (missing.Count > 0) return $"Missing Android display tools: {string.Join(", ", missing)}. Use Install / repair Android display tools in the tray menu.";
-        string? aapt2 = AndroidSdk.Newest("build-tools", "aapt2.exe", sdkRoot), zipalign = AndroidSdk.Newest("build-tools", "zipalign.exe", sdkRoot),
-                apksigner = AndroidSdk.Newest("build-tools", "apksigner.bat", sdkRoot), androidJar = AndroidSdk.Newest("platforms", "android.jar", sdkRoot);
-        if (aapt2 == null || zipalign == null || apksigner == null || androidJar == null)
-            return "Android SDK build-tools/platform not found (set AndroidSdk in config.json, or ANDROID_HOME).";
-
-        string key = Path.Combine(AppContext.BaseDirectory, "keys", "platform.pk8"), cert = Path.Combine(AppContext.BaseDirectory, "keys", "platform.x509.pem");
-        if (!File.Exists(key) || !File.Exists(cert)) return $"AOSP platform test key missing ({key}).";
-
         var framework = new StringBuilder();
         if (spec.HasCutout)
         {
@@ -155,50 +145,61 @@ internal static class AndroidCutout
             systemUi.AppendLine("    <dimen name=\"status_bar_clock_size\">0px</dimen>");
         }
 
+        return InstallOverlay(instance, FrameworkOverlay, "android", "Device frame cutout", framework.ToString(), sdkRoot)
+            ?? InstallOverlay(instance, SystemUiOverlay, "com.android.systemui", "Device frame status bar", systemUi.ToString(), sdkRoot);
+    }
+
+    /// <summary>
+    /// Builds a resource overlay for <paramref name="target"/> from <c>values.xml</c> entries, signs it with the AOSP
+    /// platform test key, installs and enables it, and checks Android really activated it. Null on success.
+    /// </summary>
+    public static string? InstallOverlay(MuMuInstance instance, string package, string target, string label, string values, string? sdkRoot)
+    {
+        var missing = AndroidTools.Missing(sdkRoot);
+        if (missing.Count > 0) return $"Missing Android display tools: {string.Join(", ", missing)}. Use Install / repair Android display tools in the tray menu.";
+        string? aapt2 = AndroidSdk.Newest("build-tools", "aapt2.exe", sdkRoot), zipalign = AndroidSdk.Newest("build-tools", "zipalign.exe", sdkRoot),
+                apksigner = AndroidSdk.Newest("build-tools", "apksigner.bat", sdkRoot), androidJar = AndroidSdk.Newest("platforms", "android.jar", sdkRoot);
+        if (aapt2 == null || zipalign == null || apksigner == null || androidJar == null)
+            return "Android SDK build-tools/platform not found (set AndroidSdk in config.json, or ANDROID_HOME).";
+
+        string key = Path.Combine(AppContext.BaseDirectory, "keys", "platform.pk8"), cert = Path.Combine(AppContext.BaseDirectory, "keys", "platform.x509.pem");
+        if (!File.Exists(key) || !File.Exists(cert)) return $"AOSP platform test key missing ({key}).";
+
         string work = Path.Combine(Path.GetTempPath(), "MuMuDeviceFrames", Guid.NewGuid().ToString("N"));
         try
         {
-            foreach (var (package, target, label, values) in new[]
-                     {
-                         (FrameworkOverlay, "android", "Device frame cutout", framework.ToString()),
-                         (SystemUiOverlay, "com.android.systemui", "Device frame status bar", systemUi.ToString()),
-                     })
-            {
-                string dir = Path.Combine(work, package);
-                Directory.CreateDirectory(Path.Combine(dir, "res", "values"));
-                File.WriteAllText(Path.Combine(dir, "AndroidManifest.xml"),
-                    $"""
-                     <?xml version="1.0" encoding="utf-8"?>
-                     <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="{package}" android:versionCode="1" android:versionName="1.0">
-                         <overlay android:targetPackage="{target}" android:priority="200" android:isStatic="false" />
-                         <application android:hasCode="false" android:label="{label}" />
-                     </manifest>
-                     """);
-                File.WriteAllText(Path.Combine(dir, "res", "values", "values.xml"), $"<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<resources>\n{values}</resources>\n");
+            string dir = Path.Combine(work, package);
+            Directory.CreateDirectory(Path.Combine(dir, "res", "values"));
+            File.WriteAllText(Path.Combine(dir, "AndroidManifest.xml"),
+                $"""
+                 <?xml version="1.0" encoding="utf-8"?>
+                 <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="{package}" android:versionCode="1" android:versionName="1.0">
+                     <overlay android:targetPackage="{target}" android:priority="200" android:isStatic="false" />
+                     <application android:hasCode="false" android:label="{label}" />
+                 </manifest>
+                 """);
+            File.WriteAllText(Path.Combine(dir, "res", "values", "values.xml"), $"<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<resources>\n{values}</resources>\n");
 
-                string compiled = Path.Combine(dir, "compiled.zip"), unsigned = Path.Combine(dir, "unsigned.apk"), aligned = Path.Combine(dir, "aligned.apk"), apk = Path.Combine(dir, "overlay.apk");
-                var steps = new (string Name, Func<(int ExitCode, string Output)> Run)[]
-                {
-                    ("aapt2 compile", () => ProcessRunner.Run(aapt2, ["compile", "--dir", Path.Combine(dir, "res"), "-o", compiled])),
-                    ("aapt2 link", () => ProcessRunner.Run(aapt2, ["link", "-o", unsigned, "-I", androidJar, "--manifest", Path.Combine(dir, "AndroidManifest.xml"), "--min-sdk-version", "30", "--target-sdk-version", "35", compiled])),
-                    ("zipalign", () => ProcessRunner.Run(zipalign, ["-f", "4", unsigned, aligned])),
-                    ("apksigner", () => ProcessRunner.RunBatch(apksigner, ["sign", "--key", key, "--cert", cert, "--out", apk, aligned])),
-                    ("adb install", () => instance.Adb("install", "-r", apk)),
-                    ("overlay enable", () => instance.Shell($"cmd overlay enable --user 0 {package}")),
-                };
-                foreach (var (name, run) in steps)
-                {
-                    var (exit, output) = run();
-                    bool failed = exit != 0 || (name == "adb install" && !output.Contains("Success"));
-                    if (failed) return $"{name} failed for {package}: {output.Trim()}";
-                }
+            string compiled = Path.Combine(dir, "compiled.zip"), unsigned = Path.Combine(dir, "unsigned.apk"), aligned = Path.Combine(dir, "aligned.apk"), apk = Path.Combine(dir, "overlay.apk");
+            var steps = new (string Name, Func<(int ExitCode, string Output)> Run)[]
+            {
+                ("aapt2 compile", () => ProcessRunner.Run(aapt2, ["compile", "--dir", Path.Combine(dir, "res"), "-o", compiled])),
+                ("aapt2 link", () => ProcessRunner.Run(aapt2, ["link", "-o", unsigned, "-I", androidJar, "--manifest", Path.Combine(dir, "AndroidManifest.xml"), "--min-sdk-version", "30", "--target-sdk-version", "35", compiled])),
+                ("zipalign", () => ProcessRunner.Run(zipalign, ["-f", "4", unsigned, aligned])),
+                ("apksigner", () => ProcessRunner.RunBatch(apksigner, ["sign", "--key", key, "--cert", cert, "--out", apk, aligned])),
+                ("adb install", () => instance.Adb("install", "-r", apk)),
+                ("overlay enable", () => instance.Shell($"cmd overlay enable --user 0 {package}")),
+            };
+            foreach (var (name, run) in steps)
+            {
+                var (exit, output) = run();
+                bool failed = exit != 0 || (name == "adb install" && !output.Contains("Success"));
+                if (failed) return $"{name} failed for {package}: {output.Trim()}";
             }
 
             // Installing is not proof: Android silently ignores an overlay whose signature doesn't satisfy the target.
-            string list = instance.Shell("cmd overlay list").Output;
-            foreach (var package in new[] { FrameworkOverlay, SystemUiOverlay })
-                if (!list.Contains($"[x] {package}"))
-                    return $"Android did not activate {package} (this image is probably not signed with the AOSP platform test key).";
+            if (!instance.Shell("cmd overlay list").Output.Contains($"[x] {package}"))
+                return $"Android did not activate {package} (this image is probably not signed with the AOSP platform test key).";
             return null;
         }
         catch (Exception ex)

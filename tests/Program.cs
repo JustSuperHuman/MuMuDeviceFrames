@@ -50,7 +50,10 @@ finally
 
 // iPhone Duo: pose detection, picture placement and frames (pure logic, no emulator).
 Type duoPose = assembly.GetType("MuMuDeviceFrames.DuoPose")!;
-object Folded = Enum.Parse(duoPose, "Folded"), Open = Enum.Parse(duoPose, "Open");
+object Folded = Enum.Parse(duoPose, "Folded"), Open = Enum.Parse(duoPose, "Open"), HalfOpen = Enum.Parse(duoPose, "HalfOpen");
+object? CallTyped(string type, string method, Type[] types, params object?[] args) =>
+    assembly.GetType($"MuMuDeviceFrames.{type}")!.GetMethod(method, BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic, types)!.Invoke(null, args);
+var mumuPanel = new System.Drawing.Size(2034, 2670); // MuMu's 2670 x 2034 surface, reported as a turned portrait panel
 
 // MuMu reports a landscape resolution as a portrait panel turned 90 degrees, so its overrides come back swapped.
 foreach (var (output, expected, why) in new (string, object?, string)[]
@@ -89,11 +92,11 @@ foreach (var pose in new[] { Folded, Open })
 Check(allFit, "Duo picture fits its frame exactly at every window width from 400 to 2670 px");
 
 // wm size takes natural-orientation sizes; the rotation lock keeps a portrait-only app from turning MuMu's window round.
-var turned = (string[])Call("IPhoneDuo", "Commands", Folded, new System.Drawing.Size(2034, 2670))!;
+var turned = (string[])Call("IPhoneDuo", "Commands", Folded, new System.Drawing.Size(2034, 2670), false)!;
 Check(turned.Contains("wm size 2034x1398") && turned.Contains("wm user-rotation lock 1") && turned.Contains("wm fixed-to-user-rotation enabled") && turned.Contains("wm density 480"),
     "Fold on MuMu's turned panel swaps the size and pins rotation 90");
-Check(((string[])Call("IPhoneDuo", "Commands", Open, new System.Drawing.Size(2034, 2670))!).Contains("wm size 1878x2670"), "Unfold on MuMu's turned panel swaps the size");
-var natural = (string[])Call("IPhoneDuo", "Commands", Folded, new System.Drawing.Size(2670, 2034))!;
+Check(((string[])Call("IPhoneDuo", "Commands", Open, new System.Drawing.Size(2034, 2670), false)!).Contains("wm size 1878x2670"), "Unfold on MuMu's turned panel swaps the size");
+var natural = (string[])Call("IPhoneDuo", "Commands", Folded, new System.Drawing.Size(2670, 2034), false)!;
 Check(natural.Contains("wm size 1398x2034") && natural.Contains("wm user-rotation lock 0"), "Fold on a landscape-natural panel keeps the size and rotation 0");
 Check((bool)Call("IPhoneDuo", "LooksLikeSurface", new System.Drawing.Size(1017, 775))! && !(bool)Call("IPhoneDuo", "LooksLikeSurface", new System.Drawing.Size(589, 1281))!,
     "Duo surface recognised by aspect, a phone picture is not");
@@ -104,8 +107,9 @@ string frames = Path.Combine(Path.GetTempPath(), "deviceframes-duo-" + Guid.NewG
 try
 {
     var drawn = (System.Collections.IList)Call("DuoFrames", "Ensure", frames)!;
-    Check(drawn.Count == 2, "Both Duo frames drawn");
-    foreach (var pose in new[] { Folded, Open })
+    Check(drawn.Count == 3, "All three Duo frames drawn");
+    var creaseStrength = new Dictionary<object, int>();
+    foreach (var pose in new[] { Folded, Open, HalfOpen })
     {
         var info = Call("DuoFrames", "Frame", frames, pose)!;
         var source = Call("FrameSource", "Load", info)!;
@@ -122,7 +126,9 @@ try
         }
         Check(clear, $"{pose} bezel is fully transparent over the screen");
         Check(bgra[(screen.Top + screen.Height / 2) * width * 4 + (screen.Left - 12) * 4 + 3] == 255, $"{pose} bezel is opaque beside the screen");
-        Check((glass != null) == Equals(pose, Open) && glassInside, $"{pose} glass layer: {(Equals(pose, Open) ? "crease inside the screen only" : "none")}");
+        bool isInner = !Equals(pose, Folded);
+        Check((glass != null) == isInner && glassInside, $"{pose} glass layer: {(isInner ? "crease inside the screen only" : "none")}");
+        if (glass != null) creaseStrength[pose] = Enumerable.Range(0, glass.Length / 4).Max(i => glass[i * 4 + 3]);
         if (Equals(pose, Folded))
         {
             // 20 px in from each top corner: inside the 60 px hinge-side radius, outside the 180 px opening-side one.
@@ -130,8 +136,55 @@ try
                 "Closed screen corners: tight at the hinge, generous on the opening side");
         }
     }
+    Check(creaseStrength[HalfOpen] > creaseStrength[Open] * 1.5, "Half open frame shows a deeper crease than open");
 }
 finally
 {
     Directory.Delete(frames, recursive: true);
 }
+
+// Foldable: the device state tells half open from open on the inner display; the outer display is always closed.
+var detectTypes = new[] { typeof(System.Drawing.Size), typeof(System.Drawing.Size?), typeof(int?) };
+var inner = new System.Drawing.Size(1878, 2670);
+Check(Equals(CallTyped("IPhoneDuo", "Detect", detectTypes, mumuPanel, inner, 1), HalfOpen), "Inner display in device state HALF_OPENED is half open");
+Check(Equals(CallTyped("IPhoneDuo", "Detect", detectTypes, mumuPanel, inner, 2), Open), "Inner display in device state OPENED is open");
+Check(Equals(CallTyped("IPhoneDuo", "Detect", detectTypes, mumuPanel, inner, null), Open), "Inner display without device states is open");
+Check(Equals(CallTyped("IPhoneDuo", "Detect", detectTypes, mumuPanel, new System.Drawing.Size(2034, 1398), 1), Folded),
+    "Outer display is closed whatever the device state says");
+
+// The one-line device query, as JG-Duo answered it, and as a phone without device states would.
+Type duoDevice = assembly.GetType("MuMuDeviceFrames.DuoDevice")!;
+T Prop<T>(object o, string name) => (T)o.GetType().GetProperty(name)!.GetValue(o)!;
+var opened = Call("IPhoneDuo", "ParseDevice", " cur=2670x1878 app=2670x1878 rng=1878x1878-2670x2670\nstates:0,1,2\nstate:2\npostures:1\n")!;
+Check(Prop<System.Drawing.Size?>(opened, "Current") == new System.Drawing.Size(2670, 1878) && Prop<bool>(opened, "Foldable")
+      && Prop<int?>(opened, "FoldState") == 2 && Prop<bool>(opened, "Postures"), "Device query: foldable, OPENED, postures on, landscape");
+var plain = Call("IPhoneDuo", "ParseDevice", " cur=1398x2034 app=1398x2034\nstates:0\nstate:0\npostures:0\n")!;
+Check(!Prop<bool>(plain, "Foldable") && Prop<int?>(plain, "FoldState") == null && !Prop<bool>(plain, "Postures"), "Device query: one DEFAULT state is not a foldable");
+
+// Drift: after an Android restart MuMu turns the display back and the state override is gone; both must be noticed.
+object Display(System.Drawing.Size current, bool foldable, int? state) => Activator.CreateInstance(assembly.GetType("MuMuDeviceFrames.AndroidDisplay")!,
+    mumuPanel, 480, (System.Drawing.Size?)inner, Activator.CreateInstance(duoDevice, (System.Drawing.Size?)current, foldable, state, true))!;
+var inStepTypes = new[] { duoPose, assembly.GetType("MuMuDeviceFrames.AndroidDisplay")! };
+Check((bool)CallTyped("IPhoneDuo", "InStep", inStepTypes, HalfOpen, Display(new(2670, 1878), true, 1))!, "Half open in step");
+Check(!(bool)CallTyped("IPhoneDuo", "InStep", inStepTypes, HalfOpen, Display(new(2670, 1878), true, 0))!, "Half open whose device state was reset is out of step");
+Check(!(bool)CallTyped("IPhoneDuo", "InStep", inStepTypes, Open, Display(new(1878, 2670), true, 2))!, "Open pose turned portrait by MuMu is out of step");
+Check((bool)CallTyped("IPhoneDuo", "InStep", inStepTypes, Open, Display(new(2670, 1878), false, null))!, "Open on a non-foldable Duo needs no device state");
+
+// Order on a foldable: apps must never see a fold while the window is the outer display's size (the extensions throw).
+var fold = ((string[])Call("IPhoneDuo", "Commands", Folded, mumuPanel, true)!).ToList();
+Check(fold.IndexOf("cmd device_state state 0") < fold.IndexOf("wm size 2034x1398") && fold.Contains("settings delete global display_features"),
+    "Folding drops the device state and the fold line before shrinking the display");
+var half = ((string[])Call("IPhoneDuo", "Commands", HalfOpen, mumuPanel, true)!).ToList();
+Check(half.IndexOf("wm size 1878x2670") < half.IndexOf("cmd device_state state 1")
+      && half.IndexOf("settings put global display_features fold-[0,1335,1878,1335]") < half.IndexOf("cmd device_state state 1"),
+    "Half opening grows the display and sets the fold line before the device state");
+Check(((string[])Call("IPhoneDuo", "Commands", Open, mumuPanel, true)!).Last() == "cmd device_state state 2", "Opening ends in device state OPENED");
+
+// The fold line, in the natural orientation: on MuMu's turned panel the inner display is 1878 wide and 2670 tall, so a
+// line across it at y 1335 is the vertical middle of the landscape picture apps see.
+Check((string)Call("IPhoneDuo", "FoldFeature", mumuPanel)! == "fold-[0,1335,1878,1335]", "Fold line on MuMu's turned panel");
+Check((string)Call("IPhoneDuo", "FoldFeature", new System.Drawing.Size(2670, 2034))! == "fold-[1335,0,1335,1878]", "Fold line on a landscape-natural panel");
+
+// The hotkeys: Ctrl+Alt+D closes anything open and opens a closed phone; Ctrl+Alt+B goes to half open and back to flat.
+Check(Equals(Call("IPhoneDuo", "Toggle", HalfOpen), Folded) && Equals(Call("IPhoneDuo", "Toggle", Folded), Open), "Fold hotkey: half open closes, closed opens");
+Check(Equals(Call("IPhoneDuo", "ToggleHalf", Open), HalfOpen) && Equals(Call("IPhoneDuo", "ToggleHalf", HalfOpen), Open), "Book hotkey: open half opens, half open flattens");

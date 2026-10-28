@@ -16,13 +16,13 @@ namespace MuMuDeviceFrames;
 /// </summary>
 internal static class DuoFrames
 {
-    public const string Version = "MuMuDeviceFrames iPhone Duo frames v1";
+    public const string Version = "MuMuDeviceFrames iPhone Duo frames v2";
 
     private const int Glass = 24, Gasket = 3, Rim = 12;     // black border, dark seal, titanium band (13 pt in all)
     private const int Border = Glass + Gasket + Rim;
     private const int HingeOut = 30, HingeIn = 60, HingeInset = 21; // barrel: proud of the body, tucked under it, short of the ends
     private const int Pad = 48;                              // transparent margin around the body
-    private const int CreaseWidth = 132;                     // 44 pt band, almost invisible head-on
+    private const int CreaseWidth = 132, HalfCreaseWidth = 216; // 44 pt band, almost invisible head-on; 72 pt half open
 
     private sealed record Layout(DuoPose Pose, Rectangle Screen, Size FrameSize, float RadiusLeft, float RadiusRight);
 
@@ -52,7 +52,7 @@ internal static class DuoFrames
     public static List<FrameInfo> Ensure(string root)
     {
         var frames = new List<FrameInfo>();
-        foreach (var pose in new[] { DuoPose.Folded, DuoPose.Open })
+        foreach (var pose in Enum.GetValues<DuoPose>())
         {
             string dir = Dir(root, pose);
             try
@@ -100,7 +100,9 @@ internal static class DuoFrames
         int width = layout.FrameSize.Width, height = layout.FrameSize.Height;
         var frame = new byte[width * height * 4];
         var mask = new byte[width * height * 4];
-        byte[]? glass = pose == DuoPose.Open ? new byte[width * height * 4] : null;
+        byte[]? glass = IPhoneDuo.IsInner(pose) ? new byte[width * height * 4] : null;
+        bool half = pose == DuoPose.HalfOpen;
+        int creaseWidth = half ? HalfCreaseWidth : CreaseWidth;
 
         var screen = layout.Screen;
         RectangleF Grow(int by) => RectangleF.FromLTRB(screen.Left - by, screen.Top - by, screen.Right + by, screen.Bottom + by);
@@ -149,7 +151,7 @@ internal static class DuoFrames
                 if (bodyCover > 0)
                 {
                     var c = Titanium(Math.Clamp(-dBody / Rim, 0, 1), light);
-                    if (pose == DuoPose.Open) c = Seam(c, px - centre, -dBody);
+                    if (IPhoneDuo.IsInner(pose)) c = Seam(c, px - centre, -dBody);
                     float gasket = Cover(RoundedBox(px, py, shapes.Gasket.Box, shapes.Gasket.L, shapes.Gasket.R));
                     float glassCover = Cover(RoundedBox(px, py, shapes.Glass.Box, shapes.Glass.L, shapes.Glass.R));
                     c = Mix(c, (0.075f, 0.075f, 0.082f), gasket);
@@ -163,7 +165,7 @@ internal static class DuoFrames
 
                 if (glass != null && screenCover > 0)
                 {
-                    var (cr, cg, cb, ca) = Crease((px - centre) / CreaseWidth + 0.5f);
+                    var (cr, cg, cb, ca) = Crease((px - centre) / creaseWidth + 0.5f, half);
                     Store(glass, p, cr * screenCover, cg * screenCover, cb * screenCover, ca * screenCover);
                 }
             }
@@ -233,13 +235,16 @@ internal static class DuoFrames
     }
 
     /// <summary>
-    /// The crease across a band (0..1): a shade, a sheen in the middle, a shade, as premultiplied colour. Strength as in
-    /// the HTML boards: 2.8 % black either side of 5 % white.
+    /// The crease across a band (0..1): a shade, a sheen in the middle, a shade, as premultiplied colour. Open, as in
+    /// the HTML boards: 2.8 % black either side of 5 % white. Half open the halves turn away from the light, so the
+    /// band is wider and the shading deeper: 12 % black either side of an 8 % sheen on the spine.
     /// </summary>
-    private static (float R, float G, float B, float A) Crease(float t)
+    private static (float R, float G, float B, float A) Crease(float t, bool half)
     {
         if (t <= 0 || t >= 1) return (0, 0, 0, 0);
-        (float Pos, float W, float A)[] stops = [(0, 0, 0), (0.42f, 0, 0.028f), (0.5f, 1, 0.05f), (0.58f, 0, 0.028f), (1, 0, 0)];
+        (float Pos, float W, float A)[] stops = half
+            ? [(0, 0, 0), (0.30f, 0, 0.06f), (0.44f, 0, 0.12f), (0.5f, 1, 0.08f), (0.56f, 0, 0.12f), (0.70f, 0, 0.06f), (1, 0, 0)]
+            : [(0, 0, 0), (0.42f, 0, 0.028f), (0.5f, 1, 0.05f), (0.58f, 0, 0.028f), (1, 0, 0)];
         for (int i = 1; i < stops.Length; i++)
         {
             if (t > stops[i].Pos) continue;

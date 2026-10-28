@@ -81,7 +81,8 @@ internal sealed record MuMuInstance(string Index, string ManagerPath, string Adb
 }
 
 /// <param name="Override">The <c>wm size</c> override, when one is set (the iPhone Duo poses use it).</param>
-internal sealed record AndroidDisplay(Size Native, int Density, Size? Override = null);
+/// <param name="Duo">Rotation, device state and postures overlay, asked only on the iPhone Duo's surface.</param>
+internal sealed record AndroidDisplay(Size Native, int Density, Size? Override = null, DuoDevice? Duo = null);
 
 internal static class MuMuControl
 {
@@ -182,8 +183,9 @@ internal static class MuMuControl
         var size = Regex.Match(wmSize, @"Physical size:\s*(\d+)x(\d+)");
         var density = Regex.Match(instance.Shell("wm density").Output, @"Physical density:\s*(\d+)");
         if (!size.Success || !density.Success) return null;
-        return new AndroidDisplay(new Size(int.Parse(size.Groups[1].Value), int.Parse(size.Groups[2].Value)), int.Parse(density.Groups[1].Value),
-            IPhoneDuo.ParseSize(wmSize, "Override size"));
+        var physical = new Size(int.Parse(size.Groups[1].Value), int.Parse(size.Groups[2].Value));
+        var duo = IPhoneDuo.IsSurface(physical) ? IPhoneDuo.ParseDevice(instance.Shell(IPhoneDuo.DeviceQuery).Output) : null;
+        return new AndroidDisplay(physical, int.Parse(density.Groups[1].Value), IPhoneDuo.ParseSize(wmSize, "Override size"), duo);
     }
 
     /// <summary>Writes a custom resolution into the instance's MuMu settings. Takes effect on the next emulator start.</summary>
@@ -220,6 +222,34 @@ internal static class MuMuControl
 
     public static string Restart(MuMuInstance instance) =>
         ProcessRunner.Run(instance.ManagerPath, ["control", "-v", instance.Index, "restart"], 180_000).Output.Trim();
+
+    /// <summary>One of the instance's MuMu settings (<c>MuMuManager setting -k</c>), null if MuMu did not report it.</summary>
+    public static string? GetSetting(MuMuInstance instance, string key)
+    {
+        var output = ProcessRunner.Run(instance.ManagerPath, ["setting", "-v", instance.Index, "-k", key]).Output;
+        var match = Regex.Match(output, $"\"{Regex.Escape(key)}\"\\s*:\\s*\"([^\"]*)\"");
+        return match.Success ? match.Groups[1].Value : null;
+    }
+
+    /// <summary>Writes MuMu settings; most take effect on the next start of the instance.</summary>
+    public static string SetSettings(MuMuInstance instance, params (string Key, string Value)[] settings) =>
+        ProcessRunner.Run(instance.ManagerPath, ["setting", "-v", instance.Index, .. settings.SelectMany(s => new[] { "-k", s.Key, "-val", s.Value })]).Output.Trim();
+
+    /// <summary>adb drops the connection when adbd or the emulator restarts.</summary>
+    public static void Reconnect(MuMuInstance instance) => ProcessRunner.Run(instance.AdbPath, ["connect", instance.AdbSerial], 15_000);
+
+    /// <summary>Waits until Android has finished booting (after a restart), reconnecting adb as it goes.</summary>
+    public static bool WaitForBoot(MuMuInstance instance, TimeSpan timeout)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (DateTime.UtcNow < deadline)
+        {
+            Reconnect(instance);
+            if (instance.Shell("getprop sys.boot_completed").Output.Trim() == "1") return true;
+            Thread.Sleep(2000);
+        }
+        return false;
+    }
 }
 
 internal static class AndroidSdk

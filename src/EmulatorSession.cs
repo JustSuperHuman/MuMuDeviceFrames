@@ -24,8 +24,11 @@ internal sealed class EmulatorSession : IDisposable
     private string? _failedCutout;
     private DuoPose? _wantedPose;
     private DateTime _nextPosePoll;
-    private bool _autoPoseTried;
+    private bool _autoPoseTried, _posturesTried;
+    private int _resyncAttempts;
+    private DateTime _nextResync;
     private bool _displayAnswered; // the first display query came back (with or without an answer)
+    private bool _renderPortrait;
 
     /// <summary>adb endpoint and native display, known a moment after attaching (null until then).</summary>
     public MuMuInstance? Instance { get; private set; }
@@ -109,6 +112,14 @@ internal sealed class EmulatorSession : IDisposable
         }
 
         RenderSize = new Size(rr.Width, rr.Height);
+        // MuMu turns its window when it turns Android for an app it remembers in portrait; on a Duo that breaks the
+        // pose, so check it now rather than at the next poll.
+        bool portrait = rr.Width < rr.Height;
+        if (portrait != _renderPortrait)
+        {
+            _renderPortrait = portrait;
+            if (IsDuoSurface) _nextPosePoll = DateTime.MinValue;
+        }
         var chosen = _app.Library.Find(instance.Frame);
         // An emulator in an iPhone Duo pose wears the Duo frame for that pose, unless it was given another frame.
         if (Pose is { } pose && (chosen == null || IPhoneDuo.IsDuo(chosen))) chosen = _app.Library.Find(IPhoneDuo.FrameKey(pose)) ?? chosen;
@@ -342,6 +353,25 @@ internal sealed class EmulatorSession : IDisposable
                 StartPoseSwitch(framePose);
                 return;
             }
+            // After an Android restart MuMu turns the display back and the device state override is gone; MuMu can turn
+            // the display when an app it remembers comes to the front; and two writers (this app and a script, say) can
+            // interleave. Put the pose back: a few tries, a few seconds apart, until it holds.
+            if (Pose is { } pose && !IPhoneDuo.InStep(pose, Display) && _resyncAttempts < 5 && DateTime.UtcNow >= _nextResync)
+            {
+                _resyncAttempts++;
+                _nextResync = DateTime.UtcNow.AddSeconds(3);
+                var target = IPhoneDuo.PoseOf(_app.Library.Find(config.Frame)) is { } chosen && IPhoneDuo.IsInner(chosen) == IPhoneDuo.IsInner(pose) ? chosen : pose;
+                Log.Write($"'{Title}': iPhone Duo out of step with {pose} (sees {Display.Duo?.Current}, state {Display.Duo?.FoldState}); applying {target} again");
+                StartPoseSwitch(target);
+                return;
+            }
+            // A foldable without the postures overlay reports device states but no FoldingFeature: install it (once).
+            if (Display.Duo is { Foldable: true, Postures: false } && !_posturesTried)
+            {
+                _posturesTried = true;
+                InstallPostures();
+                return;
+            }
             // Keep up with poses switched from outside this app (adb, scripts): a cheap wm size every few seconds.
             if (DateTime.UtcNow >= _nextPosePoll)
             {
@@ -440,7 +470,29 @@ internal sealed class EmulatorSession : IDisposable
         return true;
     }
 
-    public bool ToggleDuoPose() => SetDuoPose(Pose is { } pose ? IPhoneDuo.Other(pose) : DuoPose.Folded);
+    /// <summary>Fold or unfold (half open closes).</summary>
+    public bool ToggleDuoPose() => SetDuoPose(IPhoneDuo.Toggle(Pose));
+
+    /// <summary>Half open like a book, or back to flat open.</summary>
+    public bool ToggleDuoHalf() => SetDuoPose(IPhoneDuo.ToggleHalf(Pose));
+
+    /// <summary>Android reports device states (made a foldable), so apps get a FoldingFeature.</summary>
+    public bool IsFoldable => Display?.Duo?.Foldable == true;
+
+    private void InstallPostures()
+    {
+        var (instance, sdk) = (Instance!, _app.Config.AndroidSdk);
+        RunAndroidTask(() =>
+        {
+            string? error = DuoSetup.InstallPostures(instance, sdk);
+            return () =>
+            {
+                Log.Write(error == null ? $"'{Title}': iPhone Duo postures overlay installed" : $"'{Title}': postures overlay failed: {error}");
+                if (error != null) _app.Notify($"{Title}: could not install the foldable postures overlay. {error}", warning: true);
+                else _nextPosePoll = DateTime.MinValue; // read it back
+            };
+        });
+    }
 
     private void NotDuo() =>
         _app.Notify($"{Title} is not set up as an iPhone Duo. Use Android display, Set up as iPhone Duo, first.", warning: true);
@@ -479,7 +531,7 @@ internal sealed class EmulatorSession : IDisposable
         RunAndroidTask(() =>
         {
             var rendered = key is { } k ? FrameRenderer.Render(frame!, k) : null;
-            var (_, output) = instance.Shell(string.Join("; ", IPhoneDuo.Commands(pose, display.Native)));
+            var (_, output) = instance.Shell(string.Join("; ", IPhoneDuo.Commands(pose, display.Native, display.Duo?.Foldable == true)));
             var now = MuMuControl.QueryDisplay(instance);
             return () =>
             {
@@ -489,6 +541,7 @@ internal sealed class EmulatorSession : IDisposable
                 if (reached != pose)
                     _app.Notify($"{Title}: could not {(pose == DuoPose.Folded ? "fold" : "unfold")} the iPhone Duo. {output.Trim()}".TrimEnd(), warning: true);
                 SetPose(reached);
+                if (reached is { } got && IPhoneDuo.InStep(got, Display)) _resyncAttempts = 0;
                 if (rendered != null && reached == pose)
                 {
                     _pending = null;
@@ -511,6 +564,7 @@ internal sealed class EmulatorSession : IDisposable
                 if (display == null) return;
                 Display = display;
                 var pose = IPhoneDuo.Detect(display);
+                if (pose is { } now && IPhoneDuo.InStep(now, display)) _resyncAttempts = 0;
                 if (pose == Pose) return;
                 Log.Write($"'{Title}': iPhone Duo pose changed outside the app: {pose?.ToString() ?? "none"}");
                 SetPose(pose);
@@ -529,22 +583,27 @@ internal sealed class EmulatorSession : IDisposable
         _app.Config.Save();
     }
 
-    /// <summary>Gives the emulator the Duo's 2670 × 2034 surface at 480 dpi and restarts it (MuMu applies resolutions on start).</summary>
+    /// <summary>
+    /// Makes the emulator the iPhone Duo (2670 × 2034 at 480 dpi, an Android foldable with the postures overlay), with up
+    /// to two restarts the first time (see <see cref="DuoSetup"/>), and leaves it folded.
+    /// </summary>
     public void SetUpAsDuo()
     {
         if (Instance is not { } instance) return;
+        var (title, sdk) = (Title, _app.Config.AndroidSdk);
+        _app.Notify($"{title}: setting up the iPhone Duo. The emulator may restart twice.");
         RunAndroidTask(() =>
         {
-            string result = MuMuControl.SetResolution(instance, IPhoneDuo.Surface, IPhoneDuo.Density);
-            Log.Write($"'{Title}': resolution -> iPhone Duo {IPhoneDuo.Surface.Width}x{IPhoneDuo.Surface.Height} @ {IPhoneDuo.Density} dpi: {result}");
-            string restart = MuMuControl.Restart(instance);
-            Log.Write($"'{Title}': restart: {restart}");
+            string? error = DuoSetup.Run(instance, title, sdk, _ => { });
             return () =>
             {
                 Display = null;
                 Pose = null;
-                _autoPoseTried = false;
+                _autoPoseTried = _posturesTried = false;
+                _resyncAttempts = 0;
                 _displayAnswered = false;
+                _app.Notify(error == null ? $"{title} is an iPhone Duo now: fold, unfold and half open from its menu." : $"{title}: iPhone Duo setup failed. {error}", warning: error != null);
+                Sync();
             };
         });
     }

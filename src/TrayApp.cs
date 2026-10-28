@@ -7,8 +7,8 @@ namespace MuMuDeviceFrames;
 /// <summary>Tray icon, emulator discovery, menus and global hotkeys.</summary>
 internal sealed class TrayApp : ApplicationContext
 {
-    private const int FramesHotkeyId = 1, ExpoReloadHotkeyId = 2, ExpoGearHotkeyId = 3, DuoHotkeyId = 4;
-    private static readonly int[] HotkeyIds = [FramesHotkeyId, ExpoReloadHotkeyId, ExpoGearHotkeyId, DuoHotkeyId];
+    private const int FramesHotkeyId = 1, ExpoReloadHotkeyId = 2, ExpoGearHotkeyId = 3, DuoHotkeyId = 4, DuoHalfHotkeyId = 5;
+    private static readonly int[] HotkeyIds = [FramesHotkeyId, ExpoReloadHotkeyId, ExpoGearHotkeyId, DuoHotkeyId, DuoHalfHotkeyId];
 
     private readonly NotifyIcon _tray;
     private readonly ContextMenuStrip _trayMenu = new();
@@ -375,17 +375,23 @@ internal sealed class TrayApp : ApplicationContext
 
         if (session.IsDuoSurface || IPhoneDuo.IsDuo(session.Frame))
         {
-            // iPhone Duo: the two displays. Each switch is a live wm size change, no restart.
+            // iPhone Duo: the two displays, and half open like a book. Each switch is live, no restart.
             bool canFold = connected && session.IsDuoSurface;
             items.Add(new MenuItem("Fold (outer display)", null, () => session.SetDuoPose(DuoPose.Folded))
             {
                 Checked = session.Pose == DuoPose.Folded, Enabled = canFold,
-                Hint = session.Pose == DuoPose.Open ? Config.DuoHotkey : "466 × 678 pt",
+                Hint = session.Pose == DuoPose.Folded ? "466 × 678 pt" : Config.DuoHotkey,
+            });
+            items.Add(new MenuItem("Half open (book)", null, () => session.SetDuoPose(DuoPose.HalfOpen))
+            {
+                // Only a foldable can tell apps it is half open; elsewhere it would just be open.
+                Checked = session.Pose == DuoPose.HalfOpen, Enabled = canFold && session.IsFoldable,
+                Hint = !session.IsFoldable ? "Needs Set up as iPhone Duo" : session.Pose == DuoPose.HalfOpen ? "Fold reported to apps" : Config.DuoHalfHotkey,
             });
             items.Add(new MenuItem("Unfold (inner display)", null, () => session.SetDuoPose(DuoPose.Open))
             {
                 Checked = session.Pose == DuoPose.Open, Enabled = canFold,
-                Hint = session.Pose == DuoPose.Folded ? Config.DuoHotkey : "890 × 626 pt",
+                Hint = session.Pose == DuoPose.Open ? "890 × 626 pt" : session.Pose == DuoPose.Folded ? Config.DuoHotkey : Config.DuoHalfHotkey,
             });
         }
 
@@ -487,17 +493,19 @@ internal sealed class TrayApp : ApplicationContext
         if (session.Display is not { } display) return;
         items.Add(new MenuSeparator());
         var surface = IPhoneDuo.Surface;
-        if (session.IsDuoSurface)
+        if (session.IsDuoSurface && session.IsFoldable)
         {
-            items.Add(new MenuItem("Set up as iPhone Duo") { Checked = true, Enabled = false, Hint = $"{surface.Width}×{surface.Height}" });
+            items.Add(new MenuItem("Set up as iPhone Duo") { Checked = true, Enabled = false, Hint = "Foldable" });
             return;
         }
         items.Add(new MenuItem("Set up as iPhone Duo…", null, () =>
         {
             var answer = MessageBox.Show(
-                $"Set {session.Title} to {surface.Width}×{surface.Height} at {IPhoneDuo.Density} dpi and restart it now?\n\n" +
-                $"Currently {display.Native.Width}×{display.Native.Height} at {display.Density} dpi. Both iPhone Duo displays fit that surface at 1:1, " +
-                "and folding or unfolding afterwards switches between them without a restart. Anything unsaved inside the emulator is lost by the restart.",
+                $"Make {session.Title} an iPhone Duo now?\n\n" +
+                $"It runs at {surface.Width}×{surface.Height} at {IPhoneDuo.Density} dpi (now {display.Native.Width}×{display.Native.Height} at {display.Density} dpi), " +
+                "where both displays fit at 1:1, and becomes an Android foldable (closed, half open and open device states), so apps get the fold " +
+                "through Jetpack WindowManager. Adding the device states needs root once, so the emulator restarts up to twice. " +
+                "Anything unsaved inside the emulator is lost.",
                 "MuMu Device Frames", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning);
             if (answer == DialogResult.OK) session.SetUpAsDuo();
         })
@@ -559,7 +567,21 @@ internal sealed class TrayApp : ApplicationContext
         return RecordFrame(target);
     }
 
-    /// <summary>Fold (outer display), unfold (inner display), or with no pose switch to the other one.</summary>
+    /// <summary>Half open like a book, or back to flat (the book hotkey).</summary>
+    private bool ToggleDuoHalf()
+    {
+        var target = FindTarget(null);
+        if (target == null)
+        {
+            Notify("Select a MuMu emulator before folding or unfolding.", warning: true);
+            return false;
+        }
+        RememberEmulator(target);
+        Log.Write($"iPhone Duo half-open toggle on '{target.Title}'");
+        return target.ToggleDuoHalf();
+    }
+
+    /// <summary>Fold (outer display), unfold (inner display), half open, or with no pose fold / unfold.</summary>
     private bool SetDuoPoseByName(string? name, DuoPose? pose)
     {
         var target = FindTarget(name);
@@ -766,12 +788,13 @@ internal sealed class TrayApp : ApplicationContext
         bool interactiveChanged = Config.BezelInteractive != fresh.BezelInteractive;
         Config.BezelInteractive = fresh.BezelInteractive;
         if (Config.Hotkey != fresh.Hotkey || Config.ExpoReloadHotkey != fresh.ExpoReloadHotkey || Config.ExpoGearHotkey != fresh.ExpoGearHotkey
-            || Config.DuoHotkey != fresh.DuoHotkey)
+            || Config.DuoHotkey != fresh.DuoHotkey || Config.DuoHalfHotkey != fresh.DuoHalfHotkey)
         {
             Config.Hotkey = fresh.Hotkey;
             Config.ExpoReloadHotkey = fresh.ExpoReloadHotkey;
             Config.ExpoGearHotkey = fresh.ExpoGearHotkey;
             Config.DuoHotkey = fresh.DuoHotkey;
+            Config.DuoHalfHotkey = fresh.DuoHalfHotkey;
             RegisterHotkeys();
         }
 
@@ -798,6 +821,7 @@ internal sealed class TrayApp : ApplicationContext
             case ExpoReloadHotkeyId: RunExpoAction(ExpoAction.Reload); break;
             case ExpoGearHotkeyId: RunExpoAction(ExpoAction.ToggleGear); break;
             case DuoHotkeyId: SetDuoPoseByName(null, null); break;
+            case DuoHalfHotkeyId: ToggleDuoHalf(); break;
         }
     }
 
@@ -890,6 +914,7 @@ internal sealed class TrayApp : ApplicationContext
         RegisterHotkey(ExpoReloadHotkeyId, Config.ExpoReloadHotkey);
         RegisterHotkey(ExpoGearHotkeyId, Config.ExpoGearHotkey);
         RegisterHotkey(DuoHotkeyId, Config.DuoHotkey);
+        RegisterHotkey(DuoHalfHotkeyId, Config.DuoHalfHotkey);
     }
 
     private void RegisterHotkey(int id, string binding)
@@ -997,8 +1022,12 @@ internal sealed class TrayApp : ApplicationContext
     public static bool RequestFrameRecordingOfRunningInstance(string? name) => SendToRunningInstance(HiddenWindow.RecordFrameData, name);
 
     /// <summary>Folds or unfolds the iPhone Duo in the named (or active) emulator of the running tray app.</summary>
-    public static bool RequestDuoPoseOfRunningInstance(DuoPose pose, string? name) =>
-        SendToRunningInstance(pose == DuoPose.Folded ? HiddenWindow.DuoFoldData : HiddenWindow.DuoUnfoldData, name);
+    public static bool RequestDuoPoseOfRunningInstance(DuoPose pose, string? name) => SendToRunningInstance(pose switch
+    {
+        DuoPose.Folded => HiddenWindow.DuoFoldData,
+        DuoPose.HalfOpen => HiddenWindow.DuoHalfData,
+        _ => HiddenWindow.DuoUnfoldData,
+    }, name);
 
     /// <summary>True when the tray app is running (so commands go through it and its frames follow).</summary>
     public static bool IsRunning => FindWindowW(null, HiddenWindow.WindowCaption) != IntPtr.Zero;
@@ -1030,7 +1059,7 @@ internal sealed class TrayApp : ApplicationContext
         public const int WM_EXIT_REQUEST = 0x8000 + 1; // WM_APP + 1, posted by "MuMuDeviceFrames.exe --exit"
         public const int WM_EXPO_RELOAD = 0x8000 + 2, WM_EXPO_GEAR = 0x8000 + 3;
         /// <summary>WM_COPYDATA kinds; the payload is an emulator name (empty for the active one).</summary>
-        public const int RecordFrameData = 1, DuoFoldData = 2, DuoUnfoldData = 3;
+        public const int RecordFrameData = 1, DuoFoldData = 2, DuoUnfoldData = 3, DuoHalfData = 4;
 
         private readonly Action<int> _onHotkey;
         private readonly Func<ExpoAction, bool> _onExpoAction;
@@ -1058,12 +1087,12 @@ internal sealed class TrayApp : ApplicationContext
             if (m.Msg == WM_COPYDATA && m.LParam != IntPtr.Zero)
             {
                 var data = System.Runtime.InteropServices.Marshal.PtrToStructure<COPYDATASTRUCT>(m.LParam);
-                if (data.DataId is RecordFrameData or DuoFoldData or DuoUnfoldData && data.Data != IntPtr.Zero && data.ByteCount is >= 2 and <= 402 && data.ByteCount % 2 == 0)
+                if (data.DataId is RecordFrameData or DuoFoldData or DuoUnfoldData or DuoHalfData && data.Data != IntPtr.Zero && data.ByteCount is >= 2 and <= 402 && data.ByteCount % 2 == 0)
                 {
                     string? name = System.Runtime.InteropServices.Marshal.PtrToStringUni(data.Data, data.ByteCount / 2 - 1);
                     if (string.IsNullOrWhiteSpace(name)) name = null;
                     bool ok = data.DataId == RecordFrameData ? _onRecordFrame(name)
-                        : _onDuoPose(name, data.DataId == DuoFoldData ? DuoPose.Folded : DuoPose.Open);
+                        : _onDuoPose(name, data.DataId switch { DuoFoldData => DuoPose.Folded, DuoHalfData => DuoPose.HalfOpen, _ => DuoPose.Open });
                     m.Result = ok ? (IntPtr)1 : IntPtr.Zero;
                 }
                 return;

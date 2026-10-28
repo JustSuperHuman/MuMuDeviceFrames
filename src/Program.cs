@@ -31,19 +31,30 @@ internal static class Program
             return args.Length == 2 ? RunExpoCommand(args[1], ExpoAction.Reload) : TrayApp.RequestExpoActionOfRunningInstance(ExpoAction.Reload) ? 0 : 1;
         if (args.Length is 1 or 2 && args[0] == "--expo-gear")
             return args.Length == 2 ? RunExpoCommand(args[1], ExpoAction.ToggleGear) : TrayApp.RequestExpoActionOfRunningInstance(ExpoAction.ToggleGear) ? 0 : 1;
-        //   --duo-fold / --duo-unfold [name] iPhone Duo outer / inner display, through the running tray app so the frame
-        //                                      follows (active or named emulator); without the tray app, adb directly
-        if (args.Length is 1 or 2 && args[0] is "--duo-fold" or "--duo-unfold")
+        //   --duo-fold / --duo-unfold / --duo-half [name]
+        //                                      iPhone Duo closed, open flat or half open (book), through the running tray
+        //                                      app so the frame follows (active or named emulator); without it, adb directly
+        if (args.Length is 1 or 2 && args[0] is "--duo-fold" or "--duo-unfold" or "--duo-half")
         {
-            var pose = args[0] == "--duo-fold" ? DuoPose.Folded : DuoPose.Open;
+            var pose = args[0] switch { "--duo-fold" => DuoPose.Folded, "--duo-half" => DuoPose.HalfOpen, _ => DuoPose.Open };
             string? name = args.Length == 2 ? args[1] : null;
             if (TrayApp.IsRunning) return TrayApp.RequestDuoPoseOfRunningInstance(pose, name) ? 0 : 1;
             return name == null ? 1 : RunDuoCommand(name, pose);
         }
-        //   --duo-frames <folder>              draw the two iPhone Duo frames into a folder (they are built in otherwise)
+        //   --duo-setup <name>                 make an emulator the iPhone Duo: surface, foldable device states (root once,
+        //                                      up to two restarts), postures overlay; then folded
+        if (args.Length == 2 && args[0] == "--duo-setup")
+        {
+            var instance = MuMuControl.LocateByName(args[1]);
+            if (instance == null) { Log.Write($"Duo setup: emulator '{args[1]}' not found"); return 2; }
+            var error = DuoSetup.Run(instance, args[1], AppConfig.Load().AndroidSdk, _ => { });
+            if (error != null) Log.Write($"'{args[1]}': Duo setup failed: {error}");
+            return error == null ? 0 : 1;
+        }
+        //   --duo-frames <folder>              draw the iPhone Duo frames into a folder (they are built in otherwise)
         if (args.Length == 2 && args[0] == "--duo-frames")
         {
-            foreach (var pose in new[] { DuoPose.Folded, DuoPose.Open }) DuoFrames.Write(pose, DuoFrames.Dir(Path.GetFullPath(args[1]), pose));
+            foreach (var pose in Enum.GetValues<DuoPose>()) DuoFrames.Write(pose, DuoFrames.Dir(Path.GetFullPath(args[1]), pose));
             return 0;
         }
         //   --record-frame [name]             record the whole visible frame with ShareX (active/last or named emulator)
@@ -157,7 +168,7 @@ internal static class Program
             var display = instance == null ? null : MuMuControl.QueryDisplay(instance);
             if (instance == null || display == null) { Log.Write($"iPhone Duo {pose}: emulator '{name}' not found"); return 1; }
             if (!IPhoneDuo.IsSurface(display.Native)) { Log.Write($"iPhone Duo {pose}: '{name}' is {display.Native.Width}x{display.Native.Height}, not set up as an iPhone Duo"); return 1; }
-            instance.Shell(string.Join("; ", IPhoneDuo.Commands(pose, display.Native)));
+            instance.Shell(string.Join("; ", IPhoneDuo.Commands(pose, display.Native, display.Duo?.Foldable == true)));
             var reached = IPhoneDuo.Detect(MuMuControl.QueryDisplay(instance));
             Log.Write($"iPhone Duo {pose} on '{name}' (adb): now {reached?.ToString() ?? "no pose"}");
             return reached == pose ? 0 : 1;

@@ -58,6 +58,9 @@ internal sealed class AppConfig
     /// <summary>Folds or unfolds the iPhone Duo in the active or last active emulator. Empty disables the hotkey.</summary>
     public string DuoHotkey { get; set; } = "Ctrl+Alt+D";
 
+    /// <summary>Half opens the iPhone Duo like a book, or opens it flat again. Empty disables the hotkey.</summary>
+    public string DuoHalfHotkey { get; set; } = "Ctrl+Alt+B";
+
     /// <summary>Last emulator brought to the front, used when an Expo hotkey runs from another app.</summary>
     public string? LastActiveEmulator { get; set; }
 

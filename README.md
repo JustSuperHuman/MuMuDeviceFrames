@@ -27,9 +27,9 @@ was nothing like it.
   or a chat window.
 - **145 frames** from the open [device-frames-media](https://github.com/jonnyjackson26/device-frames-media) set —
   iPhone 6s to 17 Pro Max, iPhone Air, Pixel 8/9, Galaxy S21, iPads, Apple Watch — downloaded on first run.
-- **iPhone Duo, folding live.** Closed and open frames for Apple's foldable, drawn by the app itself, and a fold /
-  unfold switch that changes the emulator between the two displays in under a second, with no restart. See
-  [iPhone Duo](#iphone-duo).
+- **iPhone Duo, folding live.** Closed, half open and open frames for Apple's foldable, drawn by the app itself, and
+  a switch that changes the emulator between them in under a second, with no restart. Android itself is made a
+  foldable, so apps get the fold through Jetpack WindowManager. See [iPhone Duo](#iphone-duo).
 
 - **iOS-style status bar (optional).** Hides Android's clock and icons and draws an iPhone status bar in their place:
   bold time, cellular bars, Wi-Fi and battery, centred on the island and switching between black and white with
@@ -83,6 +83,7 @@ For the Android matching (status bar/cutout) the tool needs the Android SDK buil
 | `Ctrl+Alt+R` | Reload the Expo app in the active or last active emulator |
 | `Ctrl+Alt+G` | Show or hide Expo's floating gear in that emulator |
 | `Ctrl+Alt+D` | Fold or unfold the iPhone Duo in that emulator (see [iPhone Duo](#iphone-duo)) |
+| `Ctrl+Alt+B` | Half open that iPhone Duo like a book, or back to flat |
 | Tray icon | Same menus for every emulator, default frame, frame download, Start with Windows, exit |
 
 The Expo actions are also in each emulator's bezel and tray menus. They work when an Expo development app is in front
@@ -162,41 +163,74 @@ open, the inner 2670 × 1878 display (890 × 626 pt, landscape). MuMu cannot cha
 emulator runs at the bounding box of both, **2670 × 2034 at 480 dpi**, and Android's `wm size` picks the display.
 Each display shares one side with that surface, so Android draws it at exactly 1:1 (no scaling), centred, with black
 bars where the other display would be: folded at x 636 of the surface, open at y 78. Apps see 466 × 678 dp folded and
-890 × 626 dp open, and the switch is live, like folding a real phone.
+890 × 626 dp open, and the switch is live, like folding a real phone: the app in front is resized, not restarted
+(as long as it handles `screenSize|smallestScreenSize|screenLayout|orientation` changes, as Expo and React Native apps do).
 
-Setting an emulator up: choose **Frame ▸ Apple iPhone ▸ iPhone Duo ▸ Closed** (or Open), then **Android display ▸
-Set up as iPhone Duo…**, which writes 2670 × 2034 at 480 dpi into MuMu's settings and restarts that emulator once.
-From MuMu's CLI that is
-`MuMuManager.exe setting -v N -k resolution_mode -val custom -k resolution_width.custom -val 2670 -k resolution_height.custom -val 2034 -k resolution_dpi.custom -val 480`.
-An emulator in a Duo pose gets the Duo frame for that pose automatically.
+The emulator is also a real Android foldable. Android has the device states CLOSED, HALF_OPENED and OPENED, a framework
+overlay maps them to Jetpack WindowManager's postures, and a fold line runs down the middle of the inner display, so
+apps get a `FoldingFeature` from Jetpack WindowManager (or `androidx.window.extensions`) the way they do on a Galaxy Z
+Fold:
+
+| Pose | Display apps see | Device state | FoldingFeature |
+| --- | --- | --- | --- |
+| Closed | 466 × 678 dp, portrait | 0 CLOSED | none |
+| Half open (book) | 890 × 626 dp, landscape | 1 HALF_OPENED | vertical fold at x 1335 px, state HALF_OPENED |
+| Open | 890 × 626 dp, landscape | 2 OPENED | vertical fold at x 1335 px, state FLAT |
+
+**Setting an emulator up**: choose **Frame ▸ Apple iPhone ▸ iPhone Duo ▸ Closed**, then **Android display ▸ Set up as
+iPhone Duo…** (or `MuMuDeviceFrames.exe --duo-setup <emulator>`). It does whatever is missing, about 30 seconds the
+first time, and leaves the emulator closed:
+
+1. MuMu settings: 2670 × 2034 at 480 dpi, and MuMu's window auto-rotate off (MuMu turns its window, and Android with
+   it, to follow the app in front).
+2. The device states, in `/data/system/devicestate/device_state_configuration.xml` (owner system, mode 0644,
+   SELinux `system_data_file`). Only root can write there, and on MuMu's Android 15 image root is `adb root` (there is
+   no `su`): the setup turns on MuMu's root permission, restarts, writes the file over `adb root`, puts the root
+   permission back as it was, and restarts again so Android loads the states.
+3. The postures overlay `com.justsuperhuman.deviceframes.foldable` (`config_device_state_postures` = `0:1`, `1:2`,
+   `2:3`), signed with the AOSP platform test key like the cutout overlays. Apps read it once per process.
+
+After that nothing needs root: every pose switch runs as the shell user.
 
 | Fold / unfold | |
 | --- | --- |
-| Bezel or tray menu | **Fold (outer display)** / **Unfold (inner display)**; picking Closed or Open in the Frame menu does the same |
-| `Ctrl+Alt+D` | Toggles the active or last used emulator (`DuoHotkey` in the config) |
-| `MuMuDeviceFrames.exe --duo-fold [emulator]` / `--duo-unfold [emulator]` | Through the running tray app, so the frame follows. Without it, a named emulator is switched over adb directly |
+| Bezel or tray menu | **Fold (outer display)**, **Half open (book)**, **Unfold (inner display)**; picking Closed, Half open or Open in the Frame menu does the same |
+| `Ctrl+Alt+D` | Fold or unfold the active or last used emulator; half open folds (`DuoHotkey` in the config) |
+| `Ctrl+Alt+B` | Half open like a book, or back to flat (`DuoHalfHotkey`) |
+| `MuMuDeviceFrames.exe --duo-fold [emulator]`, `--duo-half [emulator]`, `--duo-unfold [emulator]` | Through the running tray app, so the frame follows. Without it, a named emulator is switched over adb directly |
 
-A switch runs the `wm` commands over adb, swaps the closed and open frames, and moves the window clip and the frame to
-the part of MuMu's window the new display uses. The tray app reads `wm size` when it attaches and every few seconds
-after, so a restart, or a `wm size` from a script, still ends up with the right frame. **Save** and **Copy** take the
-screenshot inside Android, and its size decides the frame: the 1398 × 2034 or 2670 × 1878 picture goes into the
-matching frame pixel for pixel.
+A switch runs the commands below over adb, swaps the frame (closed, half open or open), and moves the window clip and
+the frame to the part of MuMu's window the new display uses. The tray app reads the display, rotation and device state
+when it attaches and every few seconds after, and puts the pose back when something moved it: an Android restart
+(which clears the rotation lock and the device state; half open comes back as open), MuMu turning the display for an
+app it remembers in portrait (fixed within a second), or a script. **Save** and **Copy** take the screenshot inside
+Android, and its size decides the display: the 1398 × 2034 or 2670 × 1878 picture goes into the matching frame pixel
+for pixel.
 
-The commands, if you want them in a script: MuMu reports a landscape resolution as a portrait panel turned 90°, and
-`wm size` takes the panel's own orientation, so the sizes are swapped. Rotation is pinned so a portrait-only app cannot
-turn the display (and MuMu's window) round.
+The commands, if you want them in a script. MuMu reports a landscape resolution as a portrait panel turned 90°, and
+`wm size` takes the panel's own orientation, so the sizes are swapped; `display_features` uses that orientation too.
+Rotation is pinned so a portrait-only app cannot turn the display round. The order matters: Android only reports the
+fold while the window is the inner display's size (its extensions throw in the app for a fold that does not span the
+window), so folding drops the device state first and opening sets it last.
 
 ```
-adb shell "wm fixed-to-user-rotation enabled; wm user-rotation lock 1; wm size 2034x1398; wm density 480"   # fold
-adb shell "wm fixed-to-user-rotation enabled; wm user-rotation lock 1; wm size 1878x2670; wm density 480"   # unfold
+# fold
+adb shell "cmd device_state state 0; settings delete global display_features; wm fixed-to-user-rotation enabled; wm user-rotation lock 1; wm size 2034x1398; wm density 480"
+# half open (book)
+adb shell "wm fixed-to-user-rotation enabled; wm user-rotation lock 1; wm size 1878x2670; wm density 480; settings put global display_features fold-[0,1335,1878,1335]; cmd device_state state 1"
+# unfold
+adb shell "wm fixed-to-user-rotation enabled; wm user-rotation lock 1; wm size 1878x2670; wm density 480; settings put global display_features fold-[0,1335,1878,1335]; cmd device_state state 2"
 ```
+
+Without the foldable setup (an emulator only set to 2670 × 2034), folding and unfolding still work with the `wm`
+commands alone; apps then see the sizes but no fold, and half open is not available.
 
 The frames are drawn by the app on first run (`%APPDATA%\MuMuDeviceFrames\builtin-frames`, in the same
 frame/mask/template format as the downloaded set) and need no download. Closed: titanium rim with a lit edge, thin
 black border, small corners on the hinge side and large ones on the opening side, and the hinge barrel on the left.
-Open: rounded on all four corners, with a faint crease down the middle of the screen. The crease is a separate
-`glass.png` layer, shown in a click-through window, so taps along the middle still reach the app.
-`MuMuDeviceFrames.exe --duo-frames <folder>` writes both frames to a folder.
+Open: rounded on all four corners, with a faint crease down the middle of the screen; half open, the crease is wider
+and deeper. The crease is a separate `glass.png` layer, shown in a click-through window, so taps along the middle
+still reach the app. `MuMuDeviceFrames.exe --duo-frames <folder>` writes the frames to a folder.
 
 The Duo leaves the status bar to the app: the JustGains app hides Android's status bar on these sizes and draws the
 time, status and front camera in its own rail. So a Duo frame never installs the cutout overlays or draws the
@@ -218,6 +252,7 @@ and the Android-matching switch are stored per emulator name. `log.txt` is next 
 | `ExpoReloadHotkey` | `Ctrl+Alt+R` | Reload the Expo app in the active or last active emulator; empty string disables it. |
 | `ExpoGearHotkey` | `Ctrl+Alt+G` | Show or hide Expo's floating gear there; empty string disables it. |
 | `DuoHotkey` | `Ctrl+Alt+D` | Fold or unfold the iPhone Duo in the active or last active emulator; empty string disables it. |
+| `DuoHalfHotkey` | `Ctrl+Alt+B` | Half open that iPhone Duo, or back to flat; empty string disables it. |
 | `LastActiveEmulator` | `null` | Last emulator used for Expo hotkeys when another app is in front. Updated automatically. |
 | `RecordingPadding` | `15` | Pixels to capture around every side of the full frame, from 0 to 500. |
 | `ShareXExecutable` | `null` | Optional path to a compatible ShareX.exe outside the usual install folders. |
@@ -233,8 +268,9 @@ the app was killed — starting it again does the same) · `--download [folder]`
 `--screenshot <emulator> <out.png> [frame] [transparent|checker|#RRGGBB]` (framed screenshot at native resolution) ·
 `--snapshot <emulator> <out.png> [frame|-] [background]` (composite of the window and the frame, for checking
 alignment) · `--render <frame> <w> <h> <out.png>` · `--cutout-spec <frame> <w> <h> <dpi>` ·
-`--duo-fold [emulator]` / `--duo-unfold [emulator]` (iPhone Duo outer or inner display) · `--duo-frames <folder>` (draw
-the two iPhone Duo frames into a folder).
+`--duo-fold [emulator]` / `--duo-half [emulator]` / `--duo-unfold [emulator]` (iPhone Duo closed, half open or open) ·
+`--duo-setup <emulator>` (make it the iPhone Duo, an Android foldable) · `--duo-frames <folder>` (draw the iPhone Duo
+frames into a folder).
 
 ## How it works
 
