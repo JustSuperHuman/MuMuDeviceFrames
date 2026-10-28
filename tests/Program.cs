@@ -337,3 +337,29 @@ KeepShot(Open, openKey, newer);
 Check(ReferenceEquals(ShotOf(Open, openKey), newer), "Pose pictures: a newer picture replaces the older one");
 shotsType.GetMethod("Clear")!.Invoke(shots, []);
 Check(ShotOf(Open, openKey) == null, "Pose pictures: cleared, nothing comes back");
+
+// The safe-area repair turns the display off and on, pausing every app. It once ran every 5 s for 40 minutes when it
+// could not help; it must be tried at most three times, with growing gaps, then given up on until things change.
+var backoffType = assembly.GetType("MuMuDeviceFrames.Backoff")!;
+object NewBackoff() => Activator.CreateInstance(backoffType, [new[] { TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(20), TimeSpan.FromSeconds(10) }])!;
+bool TryAt(object b, double seconds) => (bool)backoffType.GetMethod("TryNow")!.Invoke(b, [new DateTime(2026, 1, 1).AddSeconds(seconds)])!;
+bool GaveUp(object b) => (bool)backoffType.GetProperty("GaveUp")!.GetValue(b)!;
+var repair = NewBackoff();
+var tried = Enumerable.Range(0, 120).Where(second => TryAt(repair, second)).ToList();
+Check(tried.SequenceEqual([0, 5, 25]), $"Safe-area repair: three tries in two minutes of polling, at 0, 5 and 25 s ({string.Join(", ", tried)})");
+Check(GaveUp(repair), "Safe-area repair: given up 10 s after the third try, and nothing more is tried");
+var early = NewBackoff();
+TryAt(early, 0);
+Check(!TryAt(early, 4.9) && TryAt(early, 5) && !GaveUp(early), "Safe-area repair: the second try waits the full 5 s");
+backoffType.GetMethod("Reset")!.Invoke(repair, []);
+Check(!GaveUp(repair) && TryAt(repair, 200) && (int)backoffType.GetProperty("Tries")!.GetValue(repair)! == 1,
+    "Safe-area repair: once they are right again (or the pose changes) the next problem gets three fresh tries");
+// The repair itself: the same forced size again (what brings WindowManager's safe areas back).
+Check((string)Call("IPhoneDuo", "ForceSizeAgain", new System.Drawing.Size(1878, 2670))! == "wm size 1878x2670", "Safe-area repair forces the display size it has again");
+// The watchdog's query no longer dumps WindowManager's windows (that crashed system_server once) unless asked to.
+string routine = (string)CallTyped("IPhoneDuo", "DeviceQuery", [typeof(bool)], false)!, withCutout = (string)CallTyped("IPhoneDuo", "DeviceQuery", [typeof(bool)], true)!;
+Check(!routine.Contains("dumpsys window") && withCutout.Contains("dumpsys window displays") && !withCutout.Contains("dumpsys window 2"),
+    "Watchdog query: no WindowManager dump once a second; its displays section only when the safe areas are read");
+var dmShown = Call("IPhoneDuo", "ParseDevice", "shown:real 2670 x 1878\nstates:0,1,2\nstate:2\npostures:1\nfocus:    displayId=0, name='ActivityRecord{120168585 u0 com.justgains.justgainsmobile.internal/.MainActivity t54}', dispatchingTimeout=25000ms\n")!;
+Check(Prop<System.Drawing.Size?>(dmShown, "Current") == new System.Drawing.Size(2670, 1878) && Prop<string?>(dmShown, "Focus") == "com.justgains.justgainsmobile.internal",
+    "Watchdog query: the size shown from DisplayManager, the app in front from the input dispatcher");

@@ -264,7 +264,8 @@ internal static class MuMuControl
         return output.Contains("\"errcode\": 0") || output.Contains("\"errcode\":0") ? null : output.Trim();
     }
 
-    public static AndroidDisplay? QueryDisplay(MuMuInstance instance)
+    /// <param name="cutout">Also read WindowManager's safe areas (<see cref="IPhoneDuo.DeviceQuery"/>).</param>
+    public static AndroidDisplay? QueryDisplay(MuMuInstance instance, bool cutout = false)
     {
         string wmSize = instance.Shell("wm size").Output;
         var size = Regex.Match(wmSize, @"Physical size:\s*(\d+)x(\d+)");
@@ -273,7 +274,7 @@ internal static class MuMuControl
         var densityOverride = Regex.Match(wmDensity, @"Override density:\s*(\d+)");
         if (!size.Success || !density.Success) return null;
         var physical = new Size(int.Parse(size.Groups[1].Value), int.Parse(size.Groups[2].Value));
-        var duo = IPhoneDuo.IsSurface(physical) ? IPhoneDuo.ParseDevice(instance.Shell(IPhoneDuo.DeviceQuery).Output) : null;
+        var duo = IPhoneDuo.IsSurface(physical) ? IPhoneDuo.ParseDevice(instance.Shell(IPhoneDuo.DeviceQuery(cutout)).Output) : null;
         return new AndroidDisplay(physical, int.Parse(density.Groups[1].Value), IPhoneDuo.ParseSize(wmSize, "Override size"), duo,
             densityOverride.Success ? int.Parse(densityOverride.Groups[1].Value) : null);
     }

@@ -1,6 +1,44 @@
 namespace MuMuDeviceFrames;
 
 /// <summary>
+/// A repair tried a few times with growing gaps, then given up on. <c>waits[i]</c> is how long to wait after try
+/// <c>i</c> before the next one, or, after the last, before giving up: one try per wait. <see cref="Reset"/> once the
+/// thing is right again (or something else changed).
+/// </summary>
+internal sealed class Backoff(params TimeSpan[] waits)
+{
+    private int _tries;
+    private DateTime _last;
+
+    /// <summary>Tries since the last <see cref="Reset"/>.</summary>
+    public int Tries => _tries;
+
+    /// <summary>Every try was made and the wait after the last one has passed.</summary>
+    public bool GaveUp { get; private set; }
+
+    /// <summary>True (and counted) when a try is due now; turns <see cref="GaveUp"/> on once the last wait is over.</summary>
+    public bool TryNow(DateTime now)
+    {
+        if (GaveUp) return false;
+        if (_tries > 0 && now - _last < waits[_tries - 1]) return false;
+        if (_tries == waits.Length)
+        {
+            GaveUp = true;
+            return false;
+        }
+        _tries++;
+        _last = now;
+        return true;
+    }
+
+    public void Reset()
+    {
+        _tries = 0;
+        GaveUp = false;
+    }
+}
+
+/// <summary>
 /// The iPhone Duo's safe areas, in pixels on the displays as held: the rail poses (closed, open, book, tent) have the
 /// rail on the right and the home indicator at the bottom; the open display upright (open portrait, tabletop) has the
 /// corner status element at the top and the home indicator at the bottom. As iOS reports them: 84 pt rail (Mail's

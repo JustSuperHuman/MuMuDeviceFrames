@@ -1369,6 +1369,7 @@ internal sealed class EmulatorSession : IDisposable
                 _seenPose = reached;
                 _seenUpright = null;
                 _nextPosePoll = DateTime.UtcNow.AddSeconds(1);
+                _nextCutoutCheck = DateTime.UtcNow.AddSeconds(1.5);
                 // MuMu turns its window within half a second when it follows; when it does not (its home screen in
                 // front), turn it then, without waiting for the next look at Android.
                 if (reached is { } arrived) _followBy = (DateTime.UtcNow.AddSeconds(0.6), IPhoneDuo.TurnsWindow(arrived));
@@ -1400,14 +1401,20 @@ internal sealed class EmulatorSession : IDisposable
 
     private void PollPose()
     {
-        _nextPosePoll = DateTime.UtcNow + PoseCheck;
+        var now = DateTime.UtcNow;
+        _nextPosePoll = now + PoseCheck;
+        // WindowManager's safe areas: after a switch, while a repair is under way, otherwise every half minute.
+        bool cutout = now >= _nextCutoutCheck || _safeAreaRefresh.Tries > 0 && !_safeAreaRefresh.GaveUp;
+        if (cutout) _nextCutoutCheck = now + TimeSpan.FromSeconds(30);
         var instance = Instance!;
         RunAndroidTask(() =>
         {
-            var display = MuMuControl.QueryDisplay(instance);
+            var display = MuMuControl.QueryDisplay(instance, cutout);
             return () => KeepPose(display);
         });
     }
+
+    private DateTime _nextCutoutCheck;
 
     // ---- iPhone Duo: the watchdog -------------------------------------------------------------------------------
 
@@ -1418,7 +1425,15 @@ internal sealed class EmulatorSession : IDisposable
     private bool? _seenUpright;      // MuMu's window then
     private string? _seenFocus;      // the app in front at the last look
     private double _seenUptime;
-    private DateTime _focusChangedAt, _lastWindowTurn, _lastSafeAreaRefresh;
+    private DateTime _focusChangedAt, _lastWindowTurn;
+
+    /// <summary>
+    /// Reading the safe areas again turns the display off and on, which pauses every app: three tries (at once, after
+    /// 5 s, after 20 more), then given up on with one notice, until they are right again or the pose changes.
+    /// </summary>
+    private readonly Backoff _safeAreaRefresh = new(TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(20), TimeSpan.FromSeconds(10));
+    private DuoPose? _safeAreaPose;
+    private bool _safeAreaNoticeShown;
     private DateTime? _disagreeSince;
     private (DateTime At, bool Upright)? _followBy;
     private bool _clipLostLogged, _frameLostLogged;
@@ -1519,13 +1534,39 @@ internal sealed class EmulatorSession : IDisposable
             return;
         }
         _resyncAttempts = 0;
-        // The safe areas apps get: stale when Android turned without reading them again. The display off and on.
-        if (config.DuoOverlay != null && duo.Cutout is { } cutout && DuoSafeAreas.For(display.Density, display.Native) is { } areas
-            && cutout != areas.Insets(target) && now - _lastSafeAreaRefresh > TimeSpan.FromSeconds(5) && Instance is { } inst)
+        // The safe areas apps get: stale when Android turned without reading them again. The display off and on, a
+        // few times at most (_safeAreaRefresh): it pauses every app, and when it does not help it must not go on.
+        if (_safeAreaPose != target)
         {
-            _lastSafeAreaRefresh = now;
-            Log.Write($"'{Title}': safe areas {cutout} are not {target}'s {areas.Insets(target)}; reading them again");
-            RunAndroidTask(() => { inst.Shell(IPhoneDuo.RefreshSafeAreas); return () => _nextPosePoll = DateTime.MinValue; });
+            _safeAreaPose = target;
+            _safeAreaRefresh.Reset();
+            _safeAreaNoticeShown = false;
+        }
+        if (config.DuoOverlay == null || duo.Cutout is not { } cutout || DuoSafeAreas.For(display.Density, display.Native) is not { } areas) return;
+        if (cutout == areas.Insets(target))
+        {
+            _safeAreaRefresh.Reset();
+            _safeAreaNoticeShown = false;
+            return;
+        }
+        if (Instance is not { } inst) return;
+        if (_safeAreaRefresh.TryNow(now))
+        {
+            // First the forced size again (WindowManager lost them, typically after Android's framework restarted; no
+            // blink), then that and the display off and on (Android turned without reading them again).
+            int attempt = _safeAreaRefresh.Tries;
+            string commands = display.Override is { } forced
+                ? IPhoneDuo.ForceSizeAgain(forced) + (attempt > 1 ? "; sleep 0.3; " + IPhoneDuo.RefreshSafeAreas : "")
+                : IPhoneDuo.RefreshSafeAreas;
+            Log.Write($"'{Title}': safe areas {cutout} are not {target}'s {areas.Insets(target)}; " +
+                $"{(attempt > 1 ? "forcing the display size again and reading them again" : "forcing the display size again")} (try {attempt} of 3)");
+            RunAndroidTask(() => { inst.Shell(commands); return () => _nextPosePoll = DateTime.MinValue; });
+        }
+        else if (_safeAreaRefresh.GaveUp && !_safeAreaNoticeShown)
+        {
+            _safeAreaNoticeShown = true;
+            Log.Write($"'{Title}': safe areas are still {cutout}, not {target}'s {areas.Insets(target)}, after {_safeAreaRefresh.Tries} tries; leaving them until the pose changes");
+            _app.Notify($"{Title}: iPhone Duo safe areas did not come back. Check iPhone Duo… repairs it.", warning: true);
         }
     }
 
@@ -1559,6 +1600,8 @@ internal sealed class EmulatorSession : IDisposable
         _seenPose = null;
         _seenUpright = null;
         _disagreeSince = null;
+        // Android's framework restarting is what loses WindowManager's safe areas: look at them soon after it is back.
+        _nextCutoutCheck = DateTime.UtcNow.AddSeconds(5);
     }
 
     /// <summary>A pose reached from outside becomes the one kept, and gets everything it needs (fold line, safe areas).</summary>

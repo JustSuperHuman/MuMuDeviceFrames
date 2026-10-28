@@ -332,22 +332,38 @@ internal static class IPhoneDuo
     public const string RefreshSafeAreas = "input keyevent 223; sleep 0.5; input keyevent 224";
 
     /// <summary>
+    /// The safe areas back in WindowManager when DisplayManager has them but apps get none. With a forced display size
+    /// (<c>wm size</c>, as every pose has) WindowManager loads the cutout from the resources again only when the size is
+    /// forced; after Android's framework restarts, the size is forced from the settings before the safe-area overlay is
+    /// there, so WindowManager keeps no cutout, and the display going off and on does not change that. Forcing the same
+    /// size again does, without the display going off.
+    /// </summary>
+    public static string ForceSizeAgain(Size forced) => $"wm size {forced.Width}x{forced.Height}";
+
+    /// <summary>
     /// One shell line for everything <see cref="DuoDevice"/> holds; <see cref="ParseDevice"/> reads its output.
     /// </summary>
-    public const string DeviceQuery =
-        "dumpsys window displays | grep -m1 ' cur='; " +
+    /// <remarks>
+    /// Run once a second by the watchdog, so nothing in it dumps WindowManager's windows and tasks: on MuMu's Android 15
+    /// that dump crashed system_server once (a null pointer in TaskUtils.shouldIgnoreDesktopHomeOcclusion, under
+    /// <c>dumpsys window</c>), which restarts Android's framework. The size shown comes from DisplayManager, the app in
+    /// front from the input dispatcher. Only <paramref name="cutout"/> reads WindowManager's safe areas (its displays
+    /// section), now and then.
+    /// </remarks>
+    public static string DeviceQuery(bool cutout = false) =>
+        "echo shown:$(dumpsys display 2>/dev/null | grep -m1 -o 'mOverrideDisplayInfo=DisplayInfo{.*' | grep -m1 -oE 'real [0-9]+ x [0-9]+'); " +
         "echo states:$(cmd device_state print-states-simple 2>/dev/null); " +
         "echo state:$(cmd device_state print-state 2>/dev/null); " +
         "echo postures:$(cmd overlay list android | grep -c 'x] " + PosturesOverlay + "'); " +
         "echo rotation:$(settings get system user_rotation); " +
         "echo features:$(settings get global display_features); " +
-        "echo cutout:$(dumpsys window displays 2>/dev/null | grep -m1 -o 'Cutout=DisplayCutout{insets=Rect([^)]*)'); " +
-        "echo focus:$(dumpsys window 2>/dev/null | grep -m1 mCurrentFocus); " +
+        (cutout ? "echo cutout:$(dumpsys window displays 2>/dev/null | grep -m1 -o 'Cutout=DisplayCutout{insets=Rect([^)]*)'); " : "") +
+        "echo focus:$(dumpsys input 2>/dev/null | grep -m1 -A1 'FocusedApplications:' | tail -1); " +
         "echo uptime:$(cut -d' ' -f1 /proc/uptime)";
 
     public static DuoDevice ParseDevice(string output)
     {
-        var current = Regex.Match(output, @"\bcur=(\d+)x(\d+)");
+        var current = Regex.Match(output, @"\bcur=(\d+)x(\d+)|\breal (\d+) x (\d+)");
         var states = Regex.Match(output, @"^states:([\d,\s]*)$", RegexOptions.Multiline);
         var ids = states.Success ? states.Groups[1].Value.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries) : [];
         bool foldable = new[] { "0", "1", "2" }.All(ids.Contains);
@@ -356,11 +372,13 @@ internal static class IPhoneDuo
         var rotation = Regex.Match(output, @"^rotation:\s*(\d+)\s*$", RegexOptions.Multiline);
         var features = Regex.Match(output, @"^features:\s*(\S*)\s*$", RegexOptions.Multiline);
         var cutout = Regex.Match(output, @"insets=Rect\((-?\d+), (-?\d+) - (-?\d+), (-?\d+)\)");
-        var focus = Regex.Match(output, @"^focus:.*mCurrentFocus=Window\{\S+ \S+ ([^/\s}]+)", RegexOptions.Multiline);
+        var focus = Regex.Match(output, @"^focus:.*?\bu\d+ ([^/\s}']+)/", RegexOptions.Multiline);
         var uptime = Regex.Match(output, @"^uptime:\s*([\d.]+)", RegexOptions.Multiline);
         int Group(Match m, int i) => int.Parse(m.Groups[i].Value);
         return new DuoDevice(
-            current.Success ? new Size(int.Parse(current.Groups[1].Value), int.Parse(current.Groups[2].Value)) : null,
+            current.Success ? current.Groups[1].Success
+                ? new Size(int.Parse(current.Groups[1].Value), int.Parse(current.Groups[2].Value))
+                : new Size(int.Parse(current.Groups[3].Value), int.Parse(current.Groups[4].Value)) : null,
             foldable,
             foldable && state.Success ? int.Parse(state.Groups[1].Value) : null,
             postures.Success && postures.Groups[1].Value != "0",
