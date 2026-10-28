@@ -27,4 +27,17 @@ internal static class DeviceAnchor
     }
 
     public static Point Centre(Rectangle frame) => new(frame.X + frame.Width / 2, frame.Y + frame.Height / 2);
+
+    /// <summary>
+    /// The emulator picture size at which the whole device fits <paramref name="work"/>, when at
+    /// <paramref name="picture"/> its frame (<paramref name="frame"/>, which scales with the picture) does not; null
+    /// when it already fits. The frame scales with MuMu's window, so a device bigger than the screen (an iPhone 8 with
+    /// its forehead and chin at MuMu's default window size) gets a smaller window rather than hanging off the screen.
+    /// </summary>
+    public static Size? PictureToFit(Size picture, Size frame, Rectangle work)
+    {
+        if (frame.Width <= work.Width && frame.Height <= work.Height) return null;
+        double scale = Math.Min((double)work.Width / frame.Width, (double)work.Height / frame.Height);
+        return new Size((int)Math.Floor(picture.Width * scale), (int)Math.Floor(picture.Height * scale));
+    }
 }

@@ -372,7 +372,19 @@ internal sealed class EmulatorSession : IDisposable
             return false;
         }
         var anchor = config.Anchor.ToPoint();
-        var target = DeviceAnchor.Place(frame.Size, anchor, Screen.FromPoint(anchor).WorkingArea);
+        var work = Screen.FromPoint(anchor).WorkingArea;
+        // A device bigger than the work area cannot be placed on it: make MuMu's window (and with it the picture and
+        // the frame) smaller first, about the same centre; the next layout puts it on the anchor.
+        if (DeviceAnchor.PictureToFit(new Size(rr.Width, rr.Height), frame.Size, work) is { } fits && ++_anchorMoves <= 3)
+        {
+            int chromeW = wr.Width - rr.Width, chromeH = wr.Height - rr.Height;
+            int w = fits.Width + chromeW, h = fits.Height + chromeH;
+            Log.Write($"'{Title}': the {frame.Width}x{frame.Height} device does not fit the {work.Width}x{work.Height} work area; MuMu's window {wr.Width}x{wr.Height} -> {w}x{h}");
+            SetWindowPos(Main, IntPtr.Zero, wr.Left + (wr.Width - w) / 2, wr.Top + (wr.Height - h) / 2, w, h, SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+            StartVerifyBurst(20);
+            return true;
+        }
+        var target = DeviceAnchor.Place(frame.Size, anchor, work);
         int dx = target.X - frame.X, dy = target.Y - frame.Y;
         if (Math.Abs(dx) <= 1 && Math.Abs(dy) <= 1)
         {

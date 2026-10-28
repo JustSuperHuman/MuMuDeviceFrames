@@ -225,3 +225,9 @@ Check(Call("DeviceSpecs", "IosSafeArea", "Android Phone", "Pixel 8") == null, "A
 var duoBar = Call("IosChrome", "DuoBarLayout", new System.Drawing.Size(1878, 2670), 480)!;
 int duoInset = (int)duoBar.GetType().GetProperty("Inset")!.GetValue(duoBar)!;
 Check(duoInset / 3.0 >= 44 - Math.Sqrt(44 * 44 - 38 * 38) + 4, $"Duo status bar items clear the screen corner ({duoInset / 3.0} pt in)");
+// A device taller than the screen (iPhone 8 at MuMu's default window: 910 x 1817 on a 1392 px work area) shrinks MuMu's
+// picture so the whole device fits, rather than hanging under the taskbar.
+var fits = (System.Drawing.Size?)Call("DeviceAnchor", "PictureToFit", new System.Drawing.Size(720, 1281), new System.Drawing.Size(910, 1817), new System.Drawing.Rectangle(0, 0, 5120, 1392));
+Check(fits is { } f8 && f8.Height * 1817 / 1281 <= 1392 && f8.Height >= 975, $"An iPhone 8 too tall for the screen gets a picture that fits ({fits})");
+Check(Call("DeviceAnchor", "PictureToFit", new System.Drawing.Size(720, 1281), new System.Drawing.Size(600, 1200), new System.Drawing.Rectangle(0, 0, 5120, 1392)) == null,
+    "A device that fits is left at its size");
