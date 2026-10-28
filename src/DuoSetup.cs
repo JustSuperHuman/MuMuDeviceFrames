@@ -25,7 +25,9 @@ internal static class DuoSetup
     /// A brand-new iPhone Duo emulator from nothing: a new MuMu instance (Android 15) at the Duo surface with root on
     /// for its first start, then everything <see cref="Run"/> does, ending folded with root off. One restart in all.
     /// </summary>
-    public static string? Create(string? name, string? sdkRoot, Action<string> progress, out string created)
+    /// <param name="named">Told the new emulator's name before it is created, so the tray app can leave it alone
+    /// until the setup is done (it would otherwise fit it to whatever frame its picture looks like, with a restart).</param>
+    public static string? Create(string? name, string? sdkRoot, Action<string> progress, out string created, Action<string>? named = null)
     {
         created = name ?? "";
         var manager = MuMuControl.FindManager();
@@ -44,6 +46,7 @@ internal static class DuoSetup
             progress(text);
         }
 
+        named?.Invoke(name);
         Say($"creating MuMu instance {index}");
         var made = ProcessRunner.Run(manager, ["create", "-v", index, "-ver", "15"], 300_000).Output;
         if (!made.Contains("\"errcode\": 0") && !made.Contains("\"errcode\":0")) return $"MuMu could not create the instance: {made.Trim()}";

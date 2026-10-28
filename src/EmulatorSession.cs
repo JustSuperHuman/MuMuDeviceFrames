@@ -27,6 +27,7 @@ internal sealed class EmulatorSession : IDisposable
     private bool _afterCaptured;
     private DateTime _afterNotBefore;
     private DateTime? _afterShownAt;
+    private bool _hiddenUnderAnimation; // clipped to a dot while the animation stands in for it
     private System.Windows.Forms.Timer? _afterTimer;
     private bool _warmed;
     private RenderedFrame? _current;
@@ -151,7 +152,7 @@ internal sealed class EmulatorSession : IDisposable
         if (IsIconic(Main) && config.Enabled && instance.Enabled) return;
 
         bool wanted = config.Enabled && instance.Enabled && Render != IntPtr.Zero
-            && IsWindowVisible(Main) && !IsZoomed(Main);
+            && IsWindowVisible(Main) && !IsZoomed(Main) && !_app.IsBeingCreated(Title);
         if (!wanted || !GetWindowRect(Main, out var wr) || !GetWindowRect(Render, out var rr) || rr.Width < 64 || rr.Height < 64 || CoversMonitor(rr))
         {
             Suspend();
@@ -672,18 +673,17 @@ internal sealed class EmulatorSession : IDisposable
         // emulator's screen again under it (the animation's dark screen covers it exactly), on every pass in case
         // something took the region away, and take the picture from there.
         if (!_animation.AtRest) return; // the 150 ms tick comes back
+        bool first = _afterShownAt == null;
+        _afterShownAt ??= DateTime.UtcNow;
+        _hiddenUnderAnimation = false;
         if (_app.Config.ClipToScreen && !Peek) ApplyRegion(new Point(rr.Left - wr.Left + picture.X, rr.Top - wr.Top + picture.Y));
-        else if (_afterShownAt == null) EmulatorClip.Remove(Main); // unclipped, as the live view shows it
+        else if (first) EmulatorClip.Remove(Main); // unclipped, as the live view shows it
         if (_afterCaptured)
         {
             _animation.Retarget(screen);
             return;
         }
-        if (_afterShownAt == null)
-        {
-            _afterShownAt = DateTime.UtcNow;
-            return; // MuMu draws into it first
-        }
+        if (first) return; // MuMu draws into it first
         _pictureOnScreen = new Rectangle(rr.Left + picture.X, rr.Top + picture.Y, picture.Width, picture.Height);
         // Android blanks the screen for a moment as it switches (and for longer when the safe areas are refreshed with
         // the display off and on); take the picture once there is one (the 150 ms tick keeps coming back here), or after
@@ -697,8 +697,10 @@ internal sealed class EmulatorSession : IDisposable
 
     /// <summary>
     /// While the animation is the device, until the new picture is wanted, the emulator stays hidden behind a one-pixel
-    /// region. Checked first thing on every pass: MuMu takes the region away when it turns its window, and the theming
-    /// layer can answer ours with its own, either of which shows MuMu's whole window round the animation.
+    /// region. Checked first thing on every pass, and kept cheap: MuMu takes the region away each time it resizes its
+    /// window to turn it (two or three times per turn), and the theming layer can answer ours with its own; MuMu's whole
+    /// window shows until the next pass. A layered, fully transparent window would not care, but MuMu takes the layered
+    /// style away again within milliseconds.
     /// </summary>
     private void KeepHiddenUnderAnimation()
     {
@@ -707,8 +709,8 @@ internal sealed class EmulatorSession : IDisposable
             ? new Point((rr.Left + rr.Right) / 2 - wr.Left, (rr.Top + rr.Bottom) / 2 - wr.Top)
             : new Point(wr.Width / 2, wr.Height / 2);
         _region = null;
+        _hiddenUnderAnimation = true;
         EmulatorClip.Hide(Main, centre);
-        PlacePictureSoon();
         StartVerifyBurst(); // look again shortly: the theming layer answers a region change
     }
 
@@ -1586,6 +1588,7 @@ internal sealed class EmulatorSession : IDisposable
             return;
         }
         _clipFailures = 0;
+        _hiddenUnderAnimation = false;
         PlacePictureSoon();
         bool first = _region == null;
         _region = (renderOffsetInWindow, _current.Key, box);
@@ -1612,8 +1615,9 @@ internal sealed class EmulatorSession : IDisposable
 
     private void ClearRegion()
     {
-        if (_region == null) return;
+        if (_region == null && !_hiddenUnderAnimation) return; // also when it goes (or the app exits) mid-animation
         _region = null;
+        _hiddenUnderAnimation = false;
         _verifyTimer?.Stop();
         EmulatorClip.Remove(Main);
         PlacePictureSoon();

@@ -47,7 +47,7 @@ internal static class EmulatorClip
         SetAttribute(hwnd, DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE);
         IntPtr dot = CreateRectRgn(keep.X, keep.Y, keep.X + 1, keep.Y + 1);
         if (SetWindowRgn(hwnd, dot, true) == 0) DeleteObject(dot);
-        else PlacePictureAgain(hwnd);
+        // No PlacePictureAgain: nothing of the picture shows, and its two compositor waits held up the next re-hide.
     }
 
     /// <summary>True while the window is hidden behind a region of at most one pixel (<see cref="Hide"/>).</summary>

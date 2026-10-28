@@ -62,7 +62,11 @@ internal static class Program
         //   --duo-create [name]                a new iPhone Duo emulator from nothing (default name "iPhone Duo")
         if (args.Length is 1 or 2 && args[0] == "--duo-create")
         {
-            var error = DuoSetup.Create(args.Length == 2 ? args[1] : null, AppConfig.Load().AndroidSdk, text => Say(text), out string created);
+            // With the tray app running, it gives the new emulator the Duo frame and leaves it alone until this is done.
+            bool tray = TrayApp.IsRunning;
+            var error = DuoSetup.Create(args.Length == 2 ? args[1] : null, AppConfig.Load().AndroidSdk, text => Say(text), out string created,
+                name => { if (tray) TrayApp.RequestDuoCreatingOfRunningInstance(name, true); });
+            if (tray && created.Length > 0) TrayApp.RequestDuoCreatingOfRunningInstance(created, false);
             Say(error == null ? $"{created} is ready: an iPhone Duo, folded. Fold and unfold from its frame's pose buttons." : $"iPhone Duo not created: {error}");
             return error == null ? 0 : 1;
         }

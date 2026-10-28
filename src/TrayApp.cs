@@ -37,6 +37,32 @@ internal sealed class TrayApp : ApplicationContext
 
     private readonly Dictionary<string, DateTime> _fitAttempts = new(StringComparer.OrdinalIgnoreCase);
 
+    private readonly Dictionary<string, DateTime> _duoCreating = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// An iPhone Duo being created (the menu or <c>--duo-create</c>): its frame is the Duo's, and the app leaves the
+    /// emulator alone until the setup is done (no fitting it to the frame its picture looks like, no overlays during
+    /// the setup's restarts). Expires on its own in case the creating process died.
+    /// </summary>
+    public bool IsBeingCreated(string emulator) => _duoCreating.TryGetValue(emulator, out var until) && DateTime.UtcNow < until;
+
+    private bool MarkDuoCreating(string name, bool creating)
+    {
+        if (creating)
+        {
+            _duoCreating[name] = DateTime.UtcNow.AddMinutes(15);
+            Config.Instance(name).Frame = IPhoneDuo.FrameKey(DuoPose.Folded);
+            Config.Save();
+            Log.Write($"'{name}': iPhone Duo being created; left alone until it is set up");
+        }
+        else if (_duoCreating.Remove(name))
+        {
+            Log.Write($"'{name}': iPhone Duo creation over");
+            foreach (var session in _sessions.Values.ToArray()) session.Sync();
+        }
+        return true;
+    }
+
     /// <summary>True (and remembered) unless this emulator was fitted to this target in the last few minutes.</summary>
     public bool TryFit(string emulator, string target)
     {
@@ -52,7 +78,7 @@ internal sealed class TrayApp : ApplicationContext
         Config = AppConfig.Load();
         Library = FrameLibrary.Load(Config.FramesRoot);
 
-        _window = new HiddenWindow(OnHotkey, RunExpoAction, RecordFrameByName, SetDuoPoseByName, SetFrameByName, ExitThread);
+        _window = new HiddenWindow(OnHotkey, RunExpoAction, RecordFrameByName, SetDuoPoseByName, SetFrameByName, MarkDuoCreating, ExitThread);
         RegisterHotkeys();
 
         _trayMenu.Opening += (_, _) => BuildMenu(_trayMenu, null);
@@ -376,7 +402,7 @@ internal sealed class TrayApp : ApplicationContext
         if (_creatingDuo) return;
         var answer = MessageBox.Show(
             "Create a new MuMu emulator set up as an iPhone Duo?\n\n" +
-            "It runs Android 15 at 2670×2034 at 480 dpi and is an Android foldable (closed, book, open, open portrait and tabletop), " +
+            "It runs Android 15 at 2670×2034 at 480 dpi and is an Android foldable (closed, book, open, open portrait, tabletop and tent), " +
             "with the Duo frame and its pose buttons. It takes a minute or two and restarts the new emulator once.",
             "MuMu Device Frames", MessageBoxButtons.OKCancel, MessageBoxIcon.Question);
         if (answer != DialogResult.OK) return;
@@ -386,11 +412,12 @@ internal sealed class TrayApp : ApplicationContext
         {
             string? error;
             string created;
-            try { error = DuoSetup.Create(null, sdk, text => Post(() => Notify($"iPhone Duo: {text}")), out created); }
+            try { error = DuoSetup.Create(null, sdk, text => Post(() => Notify($"iPhone Duo: {text}")), out created, name => Post(() => MarkDuoCreating(name, true))); }
             catch (Exception ex) { (error, created) = (ex.Message, ""); }
             Post(() =>
             {
                 _creatingDuo = false;
+                if (created.Length > 0) MarkDuoCreating(created, false);
                 Notify(error == null ? $"{created} is ready: an iPhone Duo, folded." : $"iPhone Duo not created: {error}", warning: error != null);
             });
         });
@@ -1151,6 +1178,10 @@ internal sealed class TrayApp : ApplicationContext
     /// <summary>Folds or unfolds the iPhone Duo in the named (or active) emulator of the running tray app.</summary>
     public static bool RequestDuoPoseOfRunningInstance(DuoPose pose, string? name) => SendToRunningInstance(HiddenWindow.DuoPoseData + (int)pose, name);
 
+    /// <summary>Tells the running tray app an iPhone Duo is being created under this name, or that it is over.</summary>
+    public static bool RequestDuoCreatingOfRunningInstance(string name, bool creating) =>
+        SendToRunningInstance(HiddenWindow.DuoCreatingData, (creating ? "1" : "0") + name);
+
     /// <summary>Gives an emulator a frame through the running tray app (<c>--set-frame</c>).</summary>
     public static bool RequestSetFrameOfRunningInstance(string name, string? key) =>
         SendToRunningInstance(HiddenWindow.SetFrameData, name + "" + (key ?? ""));
@@ -1185,19 +1216,21 @@ internal sealed class TrayApp : ApplicationContext
         public const int WM_EXIT_REQUEST = 0x8000 + 1; // WM_APP + 1, posted by "MuMuDeviceFrames.exe --exit"
         public const int WM_EXPO_RELOAD = 0x8000 + 2, WM_EXPO_GEAR = 0x8000 + 3;
         /// <summary>WM_COPYDATA kinds; the payload is an emulator name (empty for the active one).</summary>
-        public const int RecordFrameData = 1, SetFrameData = 2, DuoPoseData = 10; // DuoPoseData + (int)pose
+        public const int RecordFrameData = 1, SetFrameData = 2, DuoCreatingData = 3, DuoPoseData = 10; // DuoPoseData + (int)pose
 
         private readonly Action<int> _onHotkey;
         private readonly Func<ExpoAction, bool> _onExpoAction;
         private readonly Func<string?, bool> _onRecordFrame;
         private readonly Func<string?, DuoPose?, bool> _onDuoPose;
         private readonly Func<string, string?, bool> _onSetFrame;
+        private readonly Func<string, bool, bool> _onDuoCreating;
         private readonly Action _onExit;
 
         public HiddenWindow(Action<int> onHotkey, Func<ExpoAction, bool> onExpoAction, Func<string?, bool> onRecordFrame,
-            Func<string?, DuoPose?, bool> onDuoPose, Func<string, string?, bool> onSetFrame, Action onExit)
+            Func<string?, DuoPose?, bool> onDuoPose, Func<string, string?, bool> onSetFrame, Func<string, bool, bool> onDuoCreating, Action onExit)
         {
             _onSetFrame = onSetFrame;
+            _onDuoCreating = onDuoCreating;
             _onHotkey = onHotkey;
             _onExpoAction = onExpoAction;
             _onRecordFrame = onRecordFrame;
@@ -1216,9 +1249,14 @@ internal sealed class TrayApp : ApplicationContext
             {
                 var data = System.Runtime.InteropServices.Marshal.PtrToStructure<COPYDATASTRUCT>(m.LParam);
                 bool pose = data.DataId >= DuoPoseData && data.DataId < DuoPoseData + IPhoneDuo.Poses.Length;
-                if ((data.DataId == RecordFrameData || data.DataId == SetFrameData || pose) && data.Data != IntPtr.Zero && data.ByteCount is >= 2 and <= 1002 && data.ByteCount % 2 == 0)
+                if ((data.DataId == RecordFrameData || data.DataId == SetFrameData || data.DataId == DuoCreatingData || pose) && data.Data != IntPtr.Zero && data.ByteCount is >= 2 and <= 1002 && data.ByteCount % 2 == 0)
                 {
                     string? name = System.Runtime.InteropServices.Marshal.PtrToStringUni(data.Data, data.ByteCount / 2 - 1);
+                    if (data.DataId == DuoCreatingData)
+                    {
+                        m.Result = name.Length > 1 && _onDuoCreating(name[1..], name[0] == '1') ? (IntPtr)1 : IntPtr.Zero;
+                        return;
+                    }
                     if (data.DataId == SetFrameData)
                     {
                         var parts = name.Split('', 2);
