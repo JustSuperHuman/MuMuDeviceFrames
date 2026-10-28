@@ -164,21 +164,24 @@ internal static class AndroidCutout
     }
 
     /// <summary>What <see cref="ApplyDuo"/> installs, recorded so a restart of this app does not install it again.</summary>
-    public static string DuoSignature(int portraitStatusBar) => $"duo-v2|{portraitStatusBar}";
+    public static string DuoSignature(int rail, string edge) => $"duo-v3|{rail}|{edge}";
 
     /// <summary>
-    /// The iPhone Duo's part: Android's status bar emptied (no clock, no notification icons) so the tool's iOS chrome is
-    /// all there is, and in the upright poses a status bar <paramref name="portraitStatusBar"/> px tall, so apps start
-    /// below the status element in the top-trailing corner. Android 15 sizes the status bar from
-    /// status_bar_height_default resolved for the display's configuration: only the inner display upright is portrait
-    /// and at least 600 dp wide (626 dp; closed is 466 dp wide, open is landscape), so the value goes in
-    /// values-w600dp-port and the other poses keep Android's own height (the app keeps its rail clear itself). No
-    /// cutout: the window stays the display's full size in every pose.
+    /// The iPhone Duo's part. Android's status bar is emptied (no clock, no notification icons) and 0 px tall, so the
+    /// tool's iOS chrome is all there is and the rail poses have no top inset. The rail is a <paramref name="rail"/> px
+    /// display cutout of the "waterfall" kind along one panel edge (<paramref name="edge"/>, see
+    /// <see cref="IPhoneDuo.RailEdge"/>): every app gets it as a real display-cutout inset, on the right in the rail
+    /// poses and at the top in the upright ones (where it keeps app content clear of the corner status element), with
+    /// no app restarted on a pose change. Apps that are not edge to edge are kept clear of it, as iOS keeps apps built
+    /// for older SDKs clear of the Duo's status area. Android reads a cutout only when the display starts: the
+    /// emulator has to restart once after this changes.
     /// </summary>
-    public static string? ApplyDuo(MuMuInstance instance, string? sdkRoot, int portraitStatusBar)
+    public static string? ApplyDuo(MuMuInstance instance, string? sdkRoot, int rail, string edge)
     {
-        string framework = $"    <dimen name=\"status_bar_height_default\">{portraitStatusBar}px</dimen>\n";
-        if (InstallOverlay(instance, FrameworkOverlay, "android", "Device frame cutout", framework, sdkRoot, "w600dp-port") is { } error) return error;
+        string framework = $"    <dimen name=\"status_bar_height_default\">0px</dimen>\n";
+        foreach (var side in new[] { "left", "top", "right", "bottom" })
+            framework += $"    <dimen name=\"waterfall_display_{side}_edge_size\">{(side == edge ? rail : 0)}px</dimen>\n";
+        if (InstallOverlay(instance, FrameworkOverlay, "android", "Device frame cutout", framework, sdkRoot) is { } error) return error;
         const string values = "    <integer name=\"max_notif_static_icons\">0</integer>\n" +
                               "    <dimen name=\"overflow_dot_radius\">0px</dimen>\n" +
                               "    <dimen name=\"status_bar_clock_size\">0px</dimen>\n";

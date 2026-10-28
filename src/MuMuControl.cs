@@ -319,6 +319,27 @@ internal static class MuMuControl
     public static void Reconnect(MuMuInstance instance) => ProcessRunner.Run(instance.AdbPath, ["connect", instance.AdbSerial], 15_000);
 
     /// <summary>Waits until Android has finished booting (after a restart), reconnecting adb as it goes.</summary>
+    /// <summary>
+    /// Restarts the emulator and waits for Android, keeping its <c>adb reverse</c> rules (a dev server's Metro port,
+    /// say), which a restart drops. Null when it is back.
+    /// </summary>
+    public static string? RestartAndWait(MuMuInstance instance, TimeSpan timeout)
+    {
+        var reverses = ParseReverses(instance.Adb("reverse", "--list").Output);
+        Restart(instance);
+        Thread.Sleep(6000); // the old Android answers "booted" until it has gone down
+        if (!WaitForBoot(instance, timeout)) return "The emulator did not come back after the restart.";
+        foreach (var (remote, local) in reverses) instance.Adb("reverse", remote, local);
+        if (reverses.Count > 0) Log.Write($"Instance {instance.Index}: adb reverse restored ({string.Join(", ", reverses.Select(r => r.Remote))})");
+        return null;
+    }
+
+    /// <summary>"(reverse) tcp:8082 tcp:8082" lines from <c>adb reverse --list</c>, as (device, host) pairs.</summary>
+    public static List<(string Remote, string Local)> ParseReverses(string output) =>
+        output.Split('\n').Select(line => line.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries))
+            .Where(parts => parts.Length >= 3 && parts[^2].Contains(':') && parts[^1].Contains(':'))
+            .Select(parts => (parts[^2], parts[^1])).ToList();
+
     public static bool WaitForBoot(MuMuInstance instance, TimeSpan timeout)
     {
         var deadline = DateTime.UtcNow + timeout;

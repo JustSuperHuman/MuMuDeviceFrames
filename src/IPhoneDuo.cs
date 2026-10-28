@@ -231,13 +231,14 @@ internal static class IPhoneDuo
     {
         bool turned = physical.Width < physical.Height;
         // wm size is the display in the panel's own orientation, the same for both ways round of the inner display;
-        // the rotation turns it: on MuMu's turned panel 1 shows it landscape, 0 upright.
+        // the rotation turns it. On MuMu's turned panel the rail poses use 270 (not 90): the rail's safe area is a
+        // display cutout on one edge of the panel (RailEdge), and 270 is the rotation that puts that edge on the right.
         var landscape = IsInner(pose) ? InnerScreen : OuterScreen;
         var natural = turned ? new Size(landscape.Height, landscape.Width) : landscape;
         string[] display =
         [
             "wm fixed-to-user-rotation enabled",
-            $"wm user-rotation lock {(turned != IsUpright(pose) ? 1 : 0)}",
+            $"wm user-rotation lock {RotationFor(pose, turned)}",
             $"wm size {natural.Width}x{natural.Height}",
             $"wm density {Density}",
         ];
@@ -246,6 +247,17 @@ internal static class IPhoneDuo
             ? [.. display, $"settings put global display_features {FoldFeature(physical)}", $"cmd device_state state {StateFor(pose)}"]
             : [$"cmd device_state state {StateFor(pose)}", "settings delete global display_features", .. display];
     }
+
+    /// <summary>The display rotation for a pose: the rail poses turn the panel's <see cref="RailEdge"/> to the right
+    /// (270 on MuMu's turned panel, 0 on a landscape one), the upright poses turn it to the top (0, or 90).</summary>
+    public static int RotationFor(DuoPose pose, bool turned) => turned ? (IsUpright(pose) ? 0 : 3) : (IsUpright(pose) ? 1 : 0);
+
+    /// <summary>
+    /// The panel edge (natural orientation) that carries the iPhone Duo's rail as a display cutout: shown on the right
+    /// in the rail poses and at the top in the upright ones (<see cref="RotationFor"/>). On MuMu's turned panel that is
+    /// the top edge; on a landscape panel, the right edge.
+    /// </summary>
+    public static string RailEdge(Size physical) => physical.Width < physical.Height ? "top" : "right";
 
     /// <summary>
     /// One shell line for everything <see cref="DuoDevice"/> holds; <see cref="ParseDevice"/> reads its output.

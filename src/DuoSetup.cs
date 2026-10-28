@@ -167,10 +167,5 @@ internal static class DuoSetup
         }
     }
 
-    private static string? RestartAndWait(MuMuInstance instance)
-    {
-        MuMuControl.Restart(instance);
-        Thread.Sleep(6000); // the old Android answers "booted" until it has gone down
-        return MuMuControl.WaitForBoot(instance, TimeSpan.FromMinutes(3)) ? null : "The emulator did not come back after the restart.";
-    }
+    private static string? RestartAndWait(MuMuInstance instance) => MuMuControl.RestartAndWait(instance, TimeSpan.FromMinutes(3));
 }

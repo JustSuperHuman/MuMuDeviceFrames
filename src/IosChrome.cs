@@ -23,7 +23,9 @@ internal static class IosChrome
     /// <summary>One placement of the status element: points from the screen's top-right corner (x leftwards).</summary>
     /// <param name="Scale">The ring's size against the closed rail's (Apple draws the open display's 7 % smaller).</param>
     /// <param name="TimeScale">The time's (on the open display only about 4 % smaller).</param>
-    private sealed record Element(float TimeX, float TimeY, float RingX, float RingY, float Scale, float TimeScale);
+    /// <param name="TimeGap">Upright only: the time ends this far before the ring (pt), growing leftwards, so a wider time
+    /// ("12:59") never comes closer to the ring than Apple's "9:41" does; 0 centres the time on TimeX.</param>
+    private sealed record Element(float TimeX, float TimeY, float RingX, float RingY, float Scale, float TimeScale, float TimeGap = 0);
 
     // Closed (mail-compact.png at 1.0944 px/pt): camera 37.5 pt at 48 / 48; digits 11 pt tall centred at 48.9 / 91.8;
     // ring 39.3 pt across centred at 48.0 / 130.0.
@@ -31,15 +33,16 @@ internal static class IosChrome
     private const float CameraDiameter = 37.5f, CameraX = 48.0f, CameraY = 48.0f;
     // Open and book (pane-controls.png at 1.2045 px/pt): digits centred at 45.7 / 47.7, ring 36.5 pt at 44.8 / 81.4.
     private static readonly Element Open = new(45.7f, 47.7f, 44.8f, 81.4f, 36.5f / 39.3f, 0.96f);
-    // Open portrait and tabletop (the overview card, de-rotated 10.0 deg, 0.5176 px/pt): one row 44 pt down, the time
-    // ending 8 pt before the ring, the ring 42.5 pt in.
-    private static readonly Element Corner = new(83.5f, 44.0f, 42.5f, 44.0f, 36.5f / 39.3f, 0.96f);
+    // Open portrait and tabletop (the overview card, de-rotated 10.0 deg, 0.5176 px/pt): one row 44 pt down, the ring
+    // 42.5 pt in, "9:41" ending 8.5 pt before the ring's outer edge (69.5 pt in against the ring's 61.0).
+    private static readonly Element Corner = new(0, 44.0f, 42.5f, 44.0f, 36.5f / 39.3f, 0.96f, 8.5f);
 
-    /// <summary>How far the portrait corner element reaches down (its lowest dot).</summary>
+    /// <summary>How far the portrait corner element reaches down (its lowest dot); the upright poses' top inset (the
+    /// rail's 84 pt, the same panel edge) keeps app content below it.</summary>
     public static float CornerBottom => Corner.RingY + (RingDots + DotDiameter / 2) * Corner.Scale;
 
-    /// <summary>Android's top inset in the upright poses: app content starts 4 pt below the corner element (68 pt).</summary>
-    public static int CornerInsetPt => (int)Math.Ceiling(CornerBottom + 4);
+    /// <summary>The trailing safe area of the rail, as Apple's renders show it (Mail's content ends 84 pt in).</summary>
+    public const int RailPt = 84;
 
     /// <summary>The Duo's chrome for a pose (none for other frames).</summary>
     public static ChromeKind KindFor(FrameInfo? frame, DuoPose? pose) => !IPhoneDuo.IsDuo(frame) ? ChromeKind.None : pose switch
@@ -92,7 +95,12 @@ internal static class IosChrome
             float d = CameraDiameter * pt;
             g.FillEllipse(camera, c.X - d / 2, c.Y - d / 2, d, d);
         }
-        DrawTime(g, At(element.TimeX, element.TimeY), DigitHeight * element.TimeScale * pt, state.Time, family, ink);
+        if (element.TimeGap > 0)
+        {
+            float trailing = element.RingX + (RingRadius + RingStroke / 2) * element.Scale + element.TimeGap;
+            DrawTime(g, At(trailing, element.TimeY), DigitHeight * element.TimeScale * pt, state.Time, family, ink, trailingEdge: true);
+        }
+        else DrawTime(g, At(element.TimeX, element.TimeY), DigitHeight * element.TimeScale * pt, state.Time, family, ink);
         DrawRing(g, At(element.RingX, element.RingY), element.Scale * pt, ink);
     }
 
@@ -101,7 +109,8 @@ internal static class IosChrome
     // proportions (measured on "9:41", so other times keep the face's own spacing), and centred where Apple centres it.
     private const float DigitHeight = 11.0f, NineFortyOneWidth = 30.2f;
 
-    private static void DrawTime(Graphics g, PointF centre, float digitHeight, string time, FontFamily family, Color ink)
+    /// <param name="trailingEdge">The time ends at <paramref name="centre"/>.X instead of being centred on it.</param>
+    private static void DrawTime(Graphics g, PointF centre, float digitHeight, string time, FontFamily family, Color ink, bool trailingEdge = false)
     {
         bool sf = family.Name.StartsWith("SF Pro", StringComparison.OrdinalIgnoreCase);
         var style = sf && family.IsStyleAvailable(FontStyle.Bold) || !sf ? FontStyle.Bold : FontStyle.Regular;
@@ -117,7 +126,7 @@ internal static class IosChrome
         using var m = new Matrix();
         m.Translate(centre.X, centre.Y);
         m.Scale(k * stretch, k);
-        m.Translate(-(b.Left + b.Width / 2), -(b.Top + b.Height / 2));
+        m.Translate(-(trailingEdge ? b.Right : b.Left + b.Width / 2), -(b.Top + b.Height / 2));
         path.Transform(m);
         using var brush = new SolidBrush(ink);
         g.FillPath(brush, path);

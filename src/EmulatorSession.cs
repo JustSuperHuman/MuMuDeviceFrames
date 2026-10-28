@@ -54,6 +54,9 @@ internal sealed class EmulatorSession : IDisposable
     private DateTime _sizeChangedAt;
     private DateTime? _turnSince;           // the Duo picture is not the pose's way round yet (MuMu still turning)
     private (RECT Window, RECT Render)? _laidOut; // what the frame on screen was laid out for (see Watch)
+    // Emulators (adb serials) whose iPhone Duo overlays are being installed and the emulator restarted: the session
+    // attached to the window that comes back must not start the same again. UI thread only.
+    private static readonly HashSet<string> DuoSetupRunning = [];
     private static readonly TimeSpan SettleTime = TimeSpan.FromMilliseconds(120);
     private static readonly TimeSpan TurnGrace = TimeSpan.FromSeconds(2);
     private System.Windows.Forms.Timer? _placeTimer; // MuMu's picture placed again after region changes (see PlacePictureSoon)
@@ -272,34 +275,55 @@ internal sealed class EmulatorSession : IDisposable
     {
         var state = CurrentChrome();
         bool duo = IPhoneDuo.IsDuo(Frame) && state != null;
-        if (duo != _duoBarHidden && Instance is { } instance && Display is { } display && !_androidBusy)
+        if (duo != _duoBarHidden && Instance is { } instance && Display is { } display && !_androidBusy && !DuoSetupRunning.Contains(instance.AdbSerial))
         {
             // The Duo's iOS chrome replaces Android's status bar content in every pose; turned off, Android gets its
             // own status bar back exactly as it was.
             _duoBarHidden = duo;
             var sdk = _app.Config.AndroidSdk;
             var config = _app.Config.Instance(Title);
-            int portrait = (int)Math.Round(IosChrome.CornerInsetPt * (display.DensityOverride ?? display.Density) / 160.0);
-            string signature = AndroidCutout.DuoSignature(portrait);
+            int rail = (int)Math.Round(IosChrome.RailPt * (display.DensityOverride ?? display.Density) / 160.0);
+            string edge = IPhoneDuo.RailEdge(display.Native);
+            string signature = AndroidCutout.DuoSignature(rail, edge);
             bool install = duo && config.DuoOverlay != signature, remove = !duo && config.DuoOverlay != null;
+            string title = Title, serial = instance.AdbSerial;
+            if (install || remove) DuoSetupRunning.Add(serial);
             RunAndroidTask(() =>
             {
                 string? error = null;
-                if (duo)
+                try
                 {
-                    AndroidStatusBar.Hide(instance);
-                    if (install) error = AndroidCutout.ApplyDuo(instance, sdk, portrait);
+                    if (duo)
+                    {
+                        AndroidStatusBar.Hide(instance);
+                        if (install) error = AndroidCutout.ApplyDuo(instance, sdk, rail, edge);
+                    }
+                    else
+                    {
+                        AndroidStatusBar.Restore(instance);
+                        if (remove) AndroidCutout.Remove(instance);
+                    }
+                    // Android reads the display cutout (the rail) only when the display starts. Record what is installed
+                    // first: the restart gives MuMu a new window, and the session attached to it must not install again.
+                    if ((install && error == null) || remove)
+                    {
+                        _app.Post(() =>
+                        {
+                            config.DuoOverlay = install ? signature : null;
+                            _app.Config.Save();
+                            _app.Notify($"{title}: restarting once to give apps the iPhone Duo's safe areas.");
+                        });
+                        Log.Write($"'{title}': restarting once so Android picks up the {(install ? "rail's safe area" : "removed safe area")}");
+                        if (MuMuControl.RestartAndWait(instance, TimeSpan.FromMinutes(3)) is { } restart) error = restart;
+                    }
                 }
-                else
+                finally
                 {
-                    AndroidStatusBar.Restore(instance);
-                    if (remove) AndroidCutout.Remove(instance);
+                    _app.Post(() => DuoSetupRunning.Remove(serial));
                 }
                 bool dark = AndroidStatusBar.WantsDarkGlyphs(instance);
                 return () =>
                 {
-                    if (install && error == null || remove) config.DuoOverlay = install ? signature : null;
-                    if (install || remove) _app.Config.Save();
                     _chromeDark = dark;
                     Log.Write(error == null ? $"'{Title}': Android status bar {(duo ? "emptied for the iPhone Duo's chrome" : "back")}" : $"'{Title}': Duo status bar overlay: {error}");
                     Sync();
