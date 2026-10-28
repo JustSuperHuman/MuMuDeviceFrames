@@ -27,8 +27,8 @@ was nothing like it.
   or a chat window.
 - **145 frames** from the open [device-frames-media](https://github.com/jonnyjackson26/device-frames-media) set
   (iPhone 6s to 17 Pro Max, iPhone Air, Pixel 8/9, Galaxy S21, iPads, Apple Watch), downloaded on first run.
-- **iPhone Duo, folding live.** Closed, half open and open frames for Apple's foldable, drawn by the app itself, and
-  a switch that changes the emulator between them in under a second, with no restart. Android itself is made a
+- **iPhone Duo, folding live.** Six poses of Apple's foldable (closed, open, book, open portrait, tabletop and tent),
+  framed by the app itself, and a switch that changes the emulator between them in a second or two, with no restart. Android itself is made a
   foldable, so apps get the fold through Jetpack WindowManager. See [iPhone Duo](#iphone-duo).
 
 - **iOS-style status bar (optional).** Hides Android's clock and icons and draws an iPhone status bar in their place:
@@ -184,6 +184,9 @@ Fold:
 | Closed | 466 × 678 dp, portrait | 0 CLOSED | none |
 | Half open (book) | 890 × 626 dp, landscape | 1 HALF_OPENED | vertical fold at x 1335 px, state HALF_OPENED |
 | Open | 890 × 626 dp, landscape | 2 OPENED | vertical fold at x 1335 px, state FLAT |
+| Open portrait | 626 × 890 dp, portrait | 2 OPENED | horizontal fold at y 1335 px, state FLAT |
+| Tabletop | 626 × 890 dp, portrait | 1 HALF_OPENED | horizontal fold at y 1335 px, state HALF_OPENED |
+| Tent | 678 × 466 dp, landscape (the outer display, standing folded, hinge on top) | 0 CLOSED | none |
 
 **Setting an emulator up**: choose **Frame ▸ Apple iPhone ▸ iPhone Duo ▸ Closed**, then **Android display ▸ Set up as
 iPhone Duo…** (or `MuMuDeviceFrames.exe --duo-setup <emulator>`). It does whatever is missing, about 30 seconds the
@@ -202,10 +205,12 @@ After that nothing needs root: every pose switch runs as the shell user.
 
 | Fold / unfold | |
 | --- | --- |
-| Bezel or tray menu | **Fold (outer display)**, **Half open (book)**, **Unfold (inner display)**; picking Closed, Half open or Open in the Frame menu does the same |
+| Pose buttons | Beside the device, one per pose (`DuoPoseControls` turns them off) |
+| `Ctrl+Alt+1` to `Ctrl+Alt+6` | Closed, Open, Book, Open portrait, Tabletop, Tent (`DuoPoseHotkeys` in the config) |
+| Bezel or tray menu | **Fold (outer display)**, **Half open (book)**, **Unfold (inner display)**; picking a pose in the Frame menu does the same |
 | `Ctrl+Alt+D` | Fold or unfold the active or last used emulator; half open folds (`DuoHotkey` in the config) |
 | `Ctrl+Alt+B` | Half open like a book, or back to flat (`DuoHalfHotkey`) |
-| `MuMuDeviceFrames.exe --duo-fold [emulator]`, `--duo-half [emulator]`, `--duo-unfold [emulator]` | Through the running tray app, so the frame follows. Without it, a named emulator is switched over adb directly |
+| `MuMuDeviceFrames.exe --duo-pose <closed\|open\|book\|portrait\|tabletop\|tent> [emulator]`, `--duo-fold`, `--duo-half`, `--duo-unfold` | Through the running tray app, so the frame follows. Without it, a named emulator is switched over adb directly |
 
 A switch runs the commands below over adb, swaps the frame (closed, half open or open), and moves the window clip and
 the frame to the part of MuMu's window the new display uses. The tray app reads the display, rotation and device state
@@ -228,7 +233,12 @@ adb shell "cmd device_state state 0; settings delete global display_features; wm
 adb shell "wm fixed-to-user-rotation enabled; wm user-rotation lock 1; wm size 1878x2670; wm density 480; settings put global display_features fold-[0,1335,1878,1335]; cmd device_state state 1"
 # unfold
 adb shell "wm fixed-to-user-rotation enabled; wm user-rotation lock 1; wm size 1878x2670; wm density 480; settings put global display_features fold-[0,1335,1878,1335]; cmd device_state state 2"
+# tent: the outer display at rotation 0, which shows it landscape on MuMu's turned panel
+adb shell "cmd device_state state 0; settings delete global display_features; wm fixed-to-user-rotation enabled; wm user-rotation lock 0; wm size 2034x1398; wm density 480"
 ```
+
+Open portrait and tabletop are open and book at rotation 0. MuMu turns its window upright for those and for tent
+(at rotation 1 it would stretch tent's narrower landscape picture to its window's width), and the frame follows it.
 
 Without the foldable setup (an emulator only set to 2670 × 2034), folding and unfolding still work with the `wm`
 commands alone; apps then see the sizes but no fold, and half open is not available.
@@ -237,20 +247,21 @@ The frames are drawn by the app on first run (`%APPDATA%\MuMuDeviceFrames\builti
 frame/mask/template format as the downloaded set) and need no download. Closed: titanium rim with a lit edge, thin
 black border, small corners on the hinge side and large ones on the opening side, and the hinge barrel on the left.
 Open: rounded on all four corners, with a faint crease down the middle of the screen; half open, the crease is wider
-and deeper. The crease is a separate `glass.png` layer, shown in a click-through window, so taps along the middle
+and deeper. Tent is the closed frame turned a quarter, hinge on top and outer camera at the bottom right. The crease is a separate `glass.png` layer, shown in a click-through window, so taps along the middle
 still reach the app. `MuMuDeviceFrames.exe --duo-frames <folder>` writes the frames to a folder.
 
 **iOS on the Duo.** There is no iPhone status bar on the Duo: as in Apple's renders, the status is one element, the
 time and a ring (battery as the arc over the top, Wi-Fi inside, cellular dots along its open bottom). It runs down the
-trailing rail in Closed (under the outer camera), Open and Book, and sits in the top-trailing corner in Open portrait
-and Tabletop. Its positions and sizes are measured on Apple's HIG renders and match them within 1 pt. The home
+trailing rail in Closed (under the outer camera), Open and Book, and in Tent (above the camera, which is at the bottom
+there), and sits in the top-trailing corner in Open portrait and Tabletop. Its positions and sizes are measured on Apple's HIG renders and match them within 1 pt. The home
 indicator is drawn in every pose. Light or dark comes from the pixels behind each.
 
-Every app gets the Duo's safe areas as real Android insets: in Closed, Open and Book 84 pt on the right and 34 pt at the
-bottom, in Open portrait and Tabletop 68 pt at the top and 34 pt at the bottom. They are display cutouts of the
-"waterfall" kind, with one set for the rail poses and one for the open display upright (resources for that
-configuration); after each pose switch the display goes off and on for half a second, under the fold animation,
-because that is when Android reads the cutout for the configuration it is in. No app is relaunched by a pose switch.
+Every app gets the Duo's safe areas as real Android insets: in Closed, Open, Book and Tent 84 pt on the right and 34
+pt at the bottom, in Open portrait and Tabletop 68 pt at the top and 34 pt at the bottom. They are display cutouts of
+the "waterfall" kind, in three sets (Closed, Open and Book; the open display upright; Tent), each in resources for that
+configuration. Android reads the cutout when the display turns on, for the configuration it is in, so a switch from one
+set to another turns the display off and on for half a second under the fold animation; those switches take about 1.5
+to 2 seconds, the others about one. No app is relaunched by a pose switch.
 Apps that are not edge to edge are kept clear of them (letterboxed). Installing them the first time relaunches open
 apps once.
 
@@ -276,6 +287,8 @@ and the Android-matching switch are stored per emulator name. `log.txt` is next 
 | `ExpoGearHotkey` | `Ctrl+Alt+G` | Show or hide Expo's floating gear there; empty string disables it. |
 | `DuoHotkey` | `Ctrl+Alt+D` | Fold or unfold the iPhone Duo in the active or last active emulator; empty string disables it. |
 | `DuoHalfHotkey` | `Ctrl+Alt+B` | Half open that iPhone Duo, or back to flat; empty string disables it. |
+| `DuoPoseHotkeys` | `Ctrl+Alt` | Modifiers for the six pose hotkeys, then 1 to 6; empty string disables them. |
+| `DuoPoseControls` | `true` | The pose buttons beside an iPhone Duo |
 | `LastActiveEmulator` | `null` | Last emulator used for Expo hotkeys when another app is in front. Updated automatically. |
 | `RecordingPadding` | `15` | Pixels to capture around every side of the full frame, from 0 to 500. |
 | `ShareXExecutable` | `null` | Optional path to a compatible ShareX.exe outside the usual install folders. |
@@ -291,6 +304,7 @@ the app was killed; starting it again does the same) · `--download [folder]` (f
 `--screenshot <emulator> <out.png> [frame] [transparent|checker|#RRGGBB]` (framed screenshot at native resolution) ·
 `--snapshot <emulator> <out.png> [frame|-] [background]` (composite of the window and the frame, for checking
 alignment) · `--render <frame> <w> <h> <out.png>` · `--cutout-spec <frame> <w> <h> <dpi>` ·
+`--duo-pose <closed|open|book|portrait|tabletop|tent> [emulator]` (any iPhone Duo pose) ·
 `--duo-fold [emulator]` / `--duo-half [emulator]` / `--duo-unfold [emulator]` (iPhone Duo closed, half open or open) ·
 `--duo-setup <emulator>` (make it the iPhone Duo, an Android foldable) · `--duo-frames <folder>` (draw the iPhone Duo
 frames into a folder).

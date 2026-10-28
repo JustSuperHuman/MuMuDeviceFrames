@@ -120,9 +120,10 @@ string frames = Path.Combine(Path.GetTempPath(), "deviceframes-duo-" + Guid.NewG
 try
 {
     var drawn = (System.Collections.IList)Call("DuoFrames", "Ensure", frames)!;
-    Check(drawn.Count == 5, "All five Duo frames drawn");
+    Check(drawn.Count == 6, "All six Duo frames drawn");
     var creaseStrength = new Dictionary<object, int>();
-    foreach (var pose in new[] { Folded, Open, HalfOpen, OpenPortrait, Tabletop })
+    var tentPose = Enum.Parse(duoPose, "Tent");
+    foreach (var pose in new[] { Folded, Open, HalfOpen, OpenPortrait, Tabletop, tentPose })
     {
         var info = Call("DuoFrames", "Frame", frames, pose)!;
         var source = Call("FrameSource", "Load", info)!;
@@ -139,7 +140,7 @@ try
         }
         Check(clear, $"{pose} bezel is fully transparent over the screen");
         Check(bgra[(screen.Top + screen.Height / 2) * width * 4 + (screen.Left - 12) * 4 + 3] == 255, $"{pose} bezel is opaque beside the screen");
-        bool isInner = !Equals(pose, Folded);
+        bool isInner = !Equals(pose, Folded) && !Equals(pose, tentPose);
         Check((glass != null) == isInner && glassInside, $"{pose} glass layer: {(isInner ? "crease inside the screen only" : "none")}");
         if (glass != null) creaseStrength[pose] = Enumerable.Range(0, glass.Length / 4).Max(i => glass[i * 4 + 3]);
         if (Equals(pose, Folded))
@@ -147,6 +148,12 @@ try
             // 20 px in from each top corner: inside the 60 px hinge-side radius, outside the 180 px opening-side one.
             Check(mask[(screen.Top + 20) * width + screen.Left + 20] == 255 && mask[(screen.Top + 20) * width + screen.Right - 21] == 0,
                 "Closed screen corners: tight at the hinge, generous on the opening side");
+        }
+        if (Equals(pose, tentPose))
+        {
+            // The closed phone turned a quarter clockwise: the hinge (tight corners) on top, the opening side below.
+            Check(mask[(screen.Top + 20) * width + screen.Left + 20] == 255 && mask[(screen.Bottom - 21) * width + screen.Left + 20] == 0,
+                "Tent screen corners: tight along the hinge on top, generous at the bottom");
         }
     }
     Check(creaseStrength[HalfOpen] > creaseStrength[Open] * 1.5, "Half open frame shows a deeper crease than open");
@@ -242,3 +249,22 @@ var fits = (System.Drawing.Size?)Call("DeviceAnchor", "PictureToFit", new System
 Check(fits is { } f8 && f8.Height * 1817 / 1281 <= 1392 && f8.Height >= 975, $"An iPhone 8 too tall for the screen gets a picture that fits ({fits})");
 Check(Call("DeviceAnchor", "PictureToFit", new System.Drawing.Size(720, 1281), new System.Drawing.Size(600, 1200), new System.Drawing.Rectangle(0, 0, 5120, 1392)) == null,
     "A device that fits is left at its size");
+
+// Tent, Apple's sixth pose: the outer display turned landscape (hinge on top), a closed device state, no fold line.
+var Tent = Enum.Parse(duoPose, "Tent");
+Check(Equals(Call("IPhoneDuo", "ParseCliName", "tent"), Tent) && (string)Call("IPhoneDuo", "Variant", Tent)! == "Tent", "tent parses and names its frame");
+var tentCommands = ((string[])Call("IPhoneDuo", "Commands", Tent, new System.Drawing.Size(2034, 2670), true)!).ToList();
+Check(tentCommands.Contains("wm size 2034x1398") && tentCommands.Contains("wm user-rotation lock 0") && tentCommands.Contains("cmd device_state state 0")
+      && tentCommands.Contains("settings delete global display_features"),
+    "Tent: the outer display landscape at rotation 0 (MuMu stretches a narrow landscape display at 90), closed, no fold line");
+Check(Equals(CallTyped("IPhoneDuo", "Detect", [typeof(System.Drawing.Size), typeof(System.Drawing.Size?), typeof(int?), typeof(System.Drawing.Size?)],
+          new System.Drawing.Size(2034, 2670), (System.Drawing.Size?)new System.Drawing.Size(1398, 2034), (int?)0, (System.Drawing.Size?)new System.Drawing.Size(2034, 1398)), Tent)
+      && Equals(CallTyped("IPhoneDuo", "Detect", [typeof(System.Drawing.Size), typeof(System.Drawing.Size?), typeof(int?), typeof(System.Drawing.Size?)],
+          new System.Drawing.Size(2034, 2670), (System.Drawing.Size?)new System.Drawing.Size(2034, 1398), (int?)0, (System.Drawing.Size?)new System.Drawing.Size(1398, 2034)), Folded),
+    "The outer display shown landscape is tent, upright is closed");
+Check(Equals(Call("IPhoneDuo", "Toggle", Tent), Open) && Equals(Call("IPhoneDuo", "PoseForScreen", new System.Drawing.Size(2034, 1398)), Tent),
+    "Fold hotkey opens a tent; a 2034 x 1398 screenshot is framed as tent");
+var tentPicture = (System.Drawing.Rectangle?)Call("IPhoneDuo", "PictureInRender", Tent, new System.Drawing.Size(769, 1009));
+Check(tentPicture is { X: 0, Width: 769, Height: >= 527 and <= 529 }, $"Tent picture in MuMu's upright window: full width, centred ({tentPicture})");
+var tentNatural = (System.Runtime.CompilerServices.ITuple)areas.GetType().GetProperty("TentNatural")!.GetValue(areas)!;
+Check((int)tentNatural[2]! == 252 && (int)tentNatural[3]! == 102 && (int)tentNatural[1]! == 0, "Tent (rotation 0): rail on the panel's right edge, home indicator on its bottom, nothing on top");

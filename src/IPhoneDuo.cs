@@ -3,10 +3,11 @@ using System.Text.RegularExpressions;
 namespace MuMuDeviceFrames;
 
 /// <summary>
-/// How the iPhone Duo is held. Closed uses the outer display; the other four the inner one: open flat or half open
-/// like a book (landscape, fold down the middle), and open flat or half open as a tabletop (portrait, fold across).
+/// How the iPhone Duo is held, Apple's six poses. Closed and tent use the outer display (tent: folded, standing like an
+/// A-frame, the outer display landscape); the other four the inner one: open flat or half open like a book
+/// (landscape, fold down the middle), and open flat or half open as a tabletop (portrait, fold across).
 /// </summary>
-internal enum DuoPose { Folded, Open, HalfOpen, OpenPortrait, Tabletop }
+internal enum DuoPose { Folded, Open, HalfOpen, OpenPortrait, Tabletop, Tent }
 
 /// <summary>
 /// What a Duo emulator's Android reports beyond <c>wm size</c>: the size apps see now (rotation included), and, once it
@@ -37,18 +38,29 @@ internal static class IPhoneDuo
     public static readonly Size InnerScreen = new(2670, 1878);
     /// <summary>Open portrait, tabletop: the inner display turned upright.</summary>
     public static readonly Size InnerPortrait = new(1878, 2670);
+    /// <summary>Tent: the outer display turned landscape, the hinge on top, the outer camera bottom right.</summary>
+    public static readonly Size TentScreen = new(2034, 1398);
 
-    public static readonly DuoPose[] Poses = [DuoPose.Folded, DuoPose.Open, DuoPose.HalfOpen, DuoPose.OpenPortrait, DuoPose.Tabletop];
+    /// <summary>The order of the pose buttons and of Ctrl+Alt+1 to 6 (tent last, so the first five keep their keys).</summary>
+    public static readonly DuoPose[] Poses = [DuoPose.Folded, DuoPose.Open, DuoPose.HalfOpen, DuoPose.OpenPortrait, DuoPose.Tabletop, DuoPose.Tent];
 
-    public static bool IsInner(DuoPose pose) => pose != DuoPose.Folded;
+    public static bool IsInner(DuoPose pose) => pose is not (DuoPose.Folded or DuoPose.Tent);
     /// <summary>Open portrait and tabletop: the inner display upright, the fold across it.</summary>
     public static bool IsUpright(DuoPose pose) => pose is DuoPose.OpenPortrait or DuoPose.Tabletop;
     /// <summary>Book and tabletop: the halves at an angle (device state HALF_OPENED).</summary>
     public static bool IsHalf(DuoPose pose) => pose is DuoPose.HalfOpen or DuoPose.Tabletop;
 
-    public static Size ScreenSize(DuoPose pose) => !IsInner(pose) ? OuterScreen : IsUpright(pose) ? InnerPortrait : InnerScreen;
-    /// <summary>The render surface as seen for a pose: MuMu turns its window upright for open portrait and tabletop.</summary>
-    public static Size SurfaceFor(DuoPose pose) => IsUpright(pose) ? new Size(Surface.Height, Surface.Width) : Surface;
+    public static Size ScreenSize(DuoPose pose) => pose == DuoPose.Tent ? TentScreen : !IsInner(pose) ? OuterScreen : IsUpright(pose) ? InnerPortrait : InnerScreen;
+
+    /// <summary>
+    /// The poses Android shows at rotation 0 on MuMu's turned panel, so MuMu turns its window upright for them: open
+    /// portrait, tabletop, and tent. Tent is landscape, but at rotation 90 MuMu stretches a landscape display narrower
+    /// than its window to the window's width (the picture comes out magnified and cropped); at 0 it is drawn 1:1.
+    /// </summary>
+    public static bool TurnsWindow(DuoPose pose) => IsUpright(pose) || pose == DuoPose.Tent;
+
+    /// <summary>The render surface as seen for a pose: MuMu's window is upright for <see cref="TurnsWindow"/> poses.</summary>
+    public static Size SurfaceFor(DuoPose pose) => TurnsWindow(pose) ? new Size(Surface.Height, Surface.Width) : Surface;
 
     /// <summary>Frame variant names, also what menus show.</summary>
     public static string Variant(DuoPose pose) => pose switch
@@ -57,6 +69,7 @@ internal static class IPhoneDuo
         DuoPose.HalfOpen => "Book",
         DuoPose.OpenPortrait => "Open portrait",
         DuoPose.Tabletop => "Tabletop",
+        DuoPose.Tent => "Tent",
         _ => "Open",
     };
 
@@ -67,6 +80,7 @@ internal static class IPhoneDuo
         DuoPose.HalfOpen => "book",
         DuoPose.OpenPortrait => "portrait",
         DuoPose.Tabletop => "tabletop",
+        DuoPose.Tent => "tent",
         _ => "open",
     };
 
@@ -76,7 +90,8 @@ internal static class IPhoneDuo
         "open" or "unfold" or "flat" => DuoPose.Open,
         "book" or "half" => DuoPose.HalfOpen,
         "portrait" or "open-portrait" => DuoPose.OpenPortrait,
-        "tabletop" or "table" => DuoPose.Tabletop,
+        "tabletop" or "table" or "laptop" => DuoPose.Tabletop,
+        "tent" => DuoPose.Tent,
         _ => null,
     };
 
@@ -87,16 +102,17 @@ internal static class IPhoneDuo
         DuoPose.Open => "Open: 890 × 626 pt, flat",
         DuoPose.HalfOpen => "Book: 890 × 626 pt, half open, fold down the middle",
         DuoPose.OpenPortrait => "Open portrait: 626 × 890 pt, flat",
+        DuoPose.Tent => "Tent: outer display landscape, 678 × 466 pt, standing folded",
         _ => "Tabletop: 626 × 890 pt, half open, fold across the middle",
     };
 
     public static string FrameKey(DuoPose pose) => $"{Category}/{Model}/{Variant(pose)}";
 
     /// <summary>Android device state for a pose, as defined in <see cref="DeviceStateConfig"/>.</summary>
-    public static int StateFor(DuoPose pose) => pose == DuoPose.Folded ? 0 : IsHalf(pose) ? 1 : 2;
+    public static int StateFor(DuoPose pose) => !IsInner(pose) ? 0 : IsHalf(pose) ? 1 : 2;
 
     /// <summary>Fold / unfold toggle: closed opens flat, anything open closes.</summary>
-    public static DuoPose Toggle(DuoPose? pose) => pose == DuoPose.Folded ? DuoPose.Open : DuoPose.Folded;
+    public static DuoPose Toggle(DuoPose? pose) => pose is DuoPose.Folded or DuoPose.Tent ? DuoPose.Open : DuoPose.Folded;
 
     /// <summary>Half-open toggle, keeping the way round: book and open swap, so do tabletop and open portrait.</summary>
     public static DuoPose ToggleHalf(DuoPose? pose) => pose switch
@@ -116,7 +132,7 @@ internal static class IPhoneDuo
 
     /// <summary>The display a screenshot of this size shows: outer (Folded), inner landscape (Open) or upright (OpenPortrait).</summary>
     public static DuoPose? PoseForScreen(Size size) =>
-        SameSize(size, OuterScreen) ? DuoPose.Folded : size == InnerScreen ? DuoPose.Open : size == InnerPortrait ? DuoPose.OpenPortrait : null;
+        size == OuterScreen ? DuoPose.Folded : size == TentScreen ? DuoPose.Tent : size == InnerScreen ? DuoPose.Open : size == InnerPortrait ? DuoPose.OpenPortrait : null;
 
     /// <summary>
     /// The pose to frame a screenshot in: the screenshot's size says which display and which way round, the pose shown
@@ -128,6 +144,7 @@ internal static class IPhoneDuo
         return PoseForScreen(shot) switch
         {
             DuoPose.Folded => DuoPose.Folded,
+            DuoPose.Tent => DuoPose.Tent,
             DuoPose.Open => half ? DuoPose.HalfOpen : DuoPose.Open,
             DuoPose.OpenPortrait => half ? DuoPose.Tabletop : DuoPose.OpenPortrait,
             _ => null,
@@ -144,7 +161,8 @@ internal static class IPhoneDuo
     public static DuoPose? Detect(Size physical, Size? overrideSize, int? foldState = null, Size? current = null)
     {
         if (!IsSurface(physical) || overrideSize is not { } size || !SameSize(size, OuterScreen) && !SameSize(size, InnerScreen)) return null;
-        if (SameSize(size, OuterScreen)) return DuoPose.Folded;
+        // The outer display: closed shows it upright, tent turns it landscape.
+        if (SameSize(size, OuterScreen)) return current is { } shown && shown.Width > shown.Height ? DuoPose.Tent : DuoPose.Folded;
         bool upright = current is { } now && now.Width < now.Height;
         bool half = foldState == StateFor(DuoPose.HalfOpen);
         return upright ? half ? DuoPose.Tabletop : DuoPose.OpenPortrait : half ? DuoPose.HalfOpen : DuoPose.Open;
@@ -232,7 +250,7 @@ internal static class IPhoneDuo
         bool turned = physical.Width < physical.Height;
         // wm size is the display in the panel's own orientation, the same for both ways round of the inner display;
         // the rotation turns it: on MuMu's turned panel 1 shows it landscape, 0 upright (see RotationFor).
-        var landscape = IsInner(pose) ? InnerScreen : OuterScreen;
+        var landscape = IsInner(pose) ? InnerScreen : OuterScreen; // tent is the outer display too, at the other rotation
         var natural = turned ? new Size(landscape.Height, landscape.Width) : landscape;
         string[] display =
         [
@@ -251,7 +269,10 @@ internal static class IPhoneDuo
     /// The display rotation for a pose: on MuMu's turned panel 90 for the rail poses and 0 upright; on a landscape panel
     /// 0 and 90. <see cref="DuoSafeAreas"/> turns each pose group's insets back onto the panel's edges with it.
     /// </summary>
-    public static int RotationFor(DuoPose pose, bool turned) => turned ? (IsUpright(pose) ? 0 : 1) : (IsUpright(pose) ? 1 : 0);
+    public static int RotationFor(DuoPose pose, bool turned) => turned ? (TurnsWindow(pose) ? 0 : 1) : (TurnsWindow(pose) ? 1 : 0);
+
+    /// <summary>Which safe-area set a pose uses (see <see cref="DuoSafeAreas"/>): 0 the rail poses, 1 upright, 2 tent.</summary>
+    public static int SafeAreaGroup(DuoPose pose) => pose == DuoPose.Tent ? 2 : IsUpright(pose) ? 1 : 0;
 
     /// <summary>
     /// Which panel edge (natural orientation: 0 left, 1 top, 2 right, 3 bottom) shows on a given side of the display
@@ -276,9 +297,10 @@ internal static class IPhoneDuo
 
     /// <summary>
     /// Android re-reads the display cutout (the safe areas) when the display turns on, for the configuration it is in
-    /// then; turning it off and on again after a pose switch gives the new pose its own edges. 0.4 s off is the least
-    /// that works (0.2 s is cancelled before the display goes off); the fold animation covers it. No app is relaunched
-    /// (they pause and resume, as for any screen off).
+    /// then; turning it off and on again after a switch between safe-area sets (<see cref="SafeAreaGroup"/>) gives the
+    /// new pose its own edges (within a group the set is the same). 0.4 s off is the least that works (0.2 s is cancelled before
+    /// the display goes off); the fold animation covers it. No app is relaunched (they pause and resume, as for any
+    /// screen off). A display mode change and the overlay-changed broadcast do not make Android re-read it.
     /// </summary>
     public const string RefreshSafeAreas = "input keyevent 223; sleep 0.5; input keyevent 224";
 

@@ -15,6 +15,10 @@ internal sealed record DuoSafeAreas(int Rail, int UprightTop, int Home, bool Tur
         return new DuoSafeAreas(Px(IosChrome.RailPt), Px(IosChrome.UprightTopPt), Px(IosChrome.HomeIndicatorPt), physical.Width < physical.Height);
     }
 
+    /// <summary>Tent's waterfall: the rail on the right and the home indicator at the bottom, at tent's rotation.</summary>
+    public (int Left, int Top, int Right, int Bottom) TentNatural =>
+        IPhoneDuo.ToPanel((0, 0, Rail, Home), IPhoneDuo.RotationFor(DuoPose.Tent, Turned));
+
     /// <summary>The rail poses' waterfall on the panel's edges (they run at <see cref="IPhoneDuo.RotationFor"/>).</summary>
     public (int Left, int Top, int Right, int Bottom) RailNatural =>
         IPhoneDuo.ToPanel((0, 0, Rail, Home), IPhoneDuo.RotationFor(DuoPose.Open, Turned));

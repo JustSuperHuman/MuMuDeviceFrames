@@ -29,6 +29,14 @@ internal static class DuoFrames
 
     private static Layout For(DuoPose pose)
     {
+        if (pose == DuoPose.Tent)
+        {
+            // The closed phone turned a quarter clockwise: hinge on top, outer camera bottom right.
+            var closed = For(DuoPose.Folded);
+            var s = closed.Screen;
+            var turned = new Rectangle(closed.FrameSize.Height - s.Bottom, s.X, s.Height, s.Width);
+            return new Layout(pose, turned, new Size(closed.FrameSize.Height, closed.FrameSize.Width), closed.RadiusLeft, closed.RadiusRight);
+        }
         var size = IPhoneDuo.ScreenSize(pose);
         if (pose == DuoPose.Folded)
         {
@@ -106,6 +114,30 @@ internal static class DuoFrames
     /// <summary>Writes frame.png, mask.png, glass.png (open only) and template.json for one pose into <paramref name="dir"/>.</summary>
     public static void Write(DuoPose pose, string dir)
     {
+        if (pose == DuoPose.Tent)
+        {
+            // Draw the closed phone, then turn every layer a quarter clockwise.
+            string closed = dir + ".closed";
+            Write(DuoPose.Folded, closed);
+            Directory.CreateDirectory(dir);
+            foreach (var name in new[] { "frame.png", "mask.png" })
+                using (var image = new Bitmap(Path.Combine(closed, name)))
+                {
+                    image.RotateFlip(RotateFlipType.Rotate90FlipNone);
+                    image.Save(Path.Combine(dir, name), System.Drawing.Imaging.ImageFormat.Png);
+                }
+            Directory.Delete(closed, recursive: true);
+            var tent = For(DuoPose.Tent);
+            File.WriteAllText(Path.Combine(dir, "template.json"), JsonSerializer.Serialize(new
+            {
+                frame = "frame.png",
+                mask = "mask.png",
+                screen = new { x = tent.Screen.X, y = tent.Screen.Y, width = tent.Screen.Width, height = tent.Screen.Height },
+                frameSize = new { width = tent.FrameSize.Width, height = tent.FrameSize.Height },
+                generator = Version,
+            }, new JsonSerializerOptions { WriteIndented = true }));
+            return;
+        }
         var layout = For(pose);
         int width = layout.FrameSize.Width, height = layout.FrameSize.Height;
         var frame = new byte[width * height * 4];

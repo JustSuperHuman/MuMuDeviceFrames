@@ -233,6 +233,15 @@ internal sealed class DuoPosePanel : IDisposable
                 Shape(right);
                 break;
             }
+            case DuoPose.Tent:
+            {
+                // Tent: folded and standing, the outer display facing you, the back half leaning away behind it.
+                using var back = Polygon(P(0.66f, 0.18f), P(0.92f, 0.84f), P(0.62f, 0.84f));
+                using var front = Polygon(P(0.18f, 0.18f), P(0.66f, 0.18f), P(0.62f, 0.84f), P(0.08f, 0.84f));
+                Shape(back);
+                Shape(front);
+                break;
+            }
             default:
             {
                 // Tabletop: the lower half flat on the table, the upper half standing, the fold across between them.

@@ -50,6 +50,10 @@ internal static class EmulatorClip
         else PlacePictureAgain(hwnd);
     }
 
+    /// <summary>True while the window is hidden behind a region of at most one pixel (<see cref="Hide"/>).</summary>
+    public static bool IsHidden(IntPtr hwnd) =>
+        GetWindowRgnBox(hwnd, out var box) is not (ERROR or NULLREGION) && box.Right - box.Left <= 1 && box.Bottom - box.Top <= 1;
+
     /// <summary>True while the window still carries the region we installed (nobody replaced or removed it).</summary>
     public static bool IsIntact(IntPtr hwnd, RECT expected)
     {

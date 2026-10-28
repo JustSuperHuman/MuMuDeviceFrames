@@ -5,7 +5,7 @@ namespace MuMuDeviceFrames;
 /// <summary>What iOS draws around an app on the iPhone Duo besides the home indicator: the status element (time and ring)
 /// down the trailing rail (closed, with the camera; open, book), or across the top-trailing corner (open portrait,
 /// tabletop). iPhone frames have their own status bar window.</summary>
-internal enum ChromeKind { None, DuoRailClosed, DuoRailOpen, DuoCorner }
+internal enum ChromeKind { None, DuoRailClosed, DuoRailOpen, DuoCorner, DuoRailTent }
 
 /// <summary>One state of that chrome: what, the home indicator or not, on which screen (native pixels), at what
 /// density, light or dark, the time.</summary>
@@ -25,11 +25,16 @@ internal static class IosChrome
     /// <param name="TimeScale">The time's (on the open display only about 4 % smaller).</param>
     /// <param name="TimeGap">Upright only: the time ends this far before the ring (pt), growing leftwards, so a wider time
     /// ("12:59") never comes closer to the ring than Apple's "9:41" does; 0 centres the time on TimeX.</param>
-    private sealed record Element(float TimeX, float TimeY, float RingX, float RingY, float Scale, float TimeScale, float TimeGap = 0);
+    /// <param name="FromBottom">Y measured up from the bottom edge (tent: the camera is at the bottom).</param>
+    private sealed record Element(float TimeX, float TimeY, float RingX, float RingY, float Scale, float TimeScale, float TimeGap = 0, bool FromBottom = false);
 
     // Closed (mail-compact.png at 1.0944 px/pt): camera 37.5 pt at 48 / 48; digits 11 pt tall centred at 48.9 / 91.8;
     // ring 39.3 pt across centred at 48.0 / 130.0.
     private static readonly Element Closed = new(48.9f, 91.8f, 48.0f, 130.0f, 1f, 1f);
+    // Tent (Apple's card shows the outer display landscape with the camera bottom right and the controls up the trailing
+    // edge; the status itself is cropped out there): the closed rail's element and camera, the same distances from the
+    // camera, going up from the bottom, so the controls stay aligned with the hardware as the HIG has it.
+    private static readonly Element Tent = new(48.9f, 91.8f, 48.0f, 130.0f, 1f, 1f, 0, FromBottom: true);
     private const float CameraDiameter = 37.5f, CameraX = 48.0f, CameraY = 48.0f;
     // Open and book (pane-controls.png at 1.2045 px/pt): digits centred at 45.7 / 47.7, ring 36.5 pt at 44.8 / 81.4.
     private static readonly Element Open = new(45.7f, 47.7f, 44.8f, 81.4f, 36.5f / 39.3f, 0.96f);
@@ -62,20 +67,24 @@ internal static class IosChrome
     /// Where the time and ring sit, in the screen's native pixels: the content behind them decides light or dark
     /// glyphs, as on iOS. Null when there is nothing to draw.
     /// </summary>
+    private static Element? ElementFor(ChromeKind kind) => kind switch
+    {
+        ChromeKind.DuoRailClosed => Closed,
+        ChromeKind.DuoRailTent => Tent,
+        ChromeKind.DuoRailOpen => Open,
+        ChromeKind.DuoCorner => Corner,
+        _ => null,
+    };
+
     public static Rectangle? GlyphArea(ChromeState state)
     {
-        var element = state.Kind switch
-        {
-            ChromeKind.DuoRailClosed => Closed,
-            ChromeKind.DuoRailOpen => Open,
-            ChromeKind.DuoCorner => Corner,
-            _ => null,
-        };
+        var element = ElementFor(state.Kind);
         if (element == null) return null;
         float px = state.Density / 160f, ring = (RingDots + DotDiameter) * element.Scale;
         // Rail: the column from the time's top to the ring's dots; corner: the row from the time's leading edge.
         float left = element.TimeGap > 0 ? element.RingX + ring + element.TimeGap + 40 : Math.Max(element.TimeX, element.RingX) + ring;
         float right = element.RingX - ring, top = Math.Min(element.TimeY - 12, element.RingY - ring), bottom = element.RingY + ring;
+        if (element.FromBottom) (top, bottom) = (state.Screen.Height / px - bottom, state.Screen.Height / px - top);
         return Rectangle.FromLTRB((int)(state.Screen.Width - left * px), (int)(top * px), (int)(state.Screen.Width - right * px), (int)(bottom * px));
     }
 
@@ -107,6 +116,7 @@ internal static class IosChrome
     public static ChromeKind KindFor(FrameInfo? frame, DuoPose? pose) => !IPhoneDuo.IsDuo(frame) ? ChromeKind.None : pose switch
     {
         DuoPose.Folded => ChromeKind.DuoRailClosed,
+        DuoPose.Tent => ChromeKind.DuoRailTent,
         DuoPose.Open or DuoPose.HalfOpen => ChromeKind.DuoRailOpen,
         DuoPose.OpenPortrait or DuoPose.Tabletop => ChromeKind.DuoCorner,
         _ => ChromeKind.None,
@@ -114,11 +124,11 @@ internal static class IosChrome
 
     /// <summary>
     /// The home indicator goes with the bottom safe area that keeps apps clear of it (drawn without one it sits on top
-    /// of tab bars): on the iPhone Duo once its safe-area overlay (duo-v5) is in, on Face ID iPhones once theirs has the
+    /// of tab bars): on the iPhone Duo once its safe-area overlay (duo-v6) is in, on Face ID iPhones once theirs has the
     /// home-indicator safe area.
     /// </summary>
     public static bool HomeIndicator(FrameInfo frame, string? duoOverlay, string? iphoneOverlay) => IPhoneDuo.IsDuo(frame)
-        ? duoOverlay?.StartsWith("duo-v5", StringComparison.Ordinal) == true
+        ? duoOverlay?.StartsWith("duo-v6", StringComparison.Ordinal) == true
         : AndroidCutout.HasHomeIndicator(frame) && iphoneOverlay?.EndsWith(AndroidCutout.HomeMark, StringComparison.Ordinal) == true;
 
     /// <summary>Draws onto <paramref name="g"/>: <paramref name="origin"/> is the screen's top-left on the target,
@@ -139,16 +149,10 @@ internal static class IosChrome
             using var brush = new SolidBrush(state.DarkHome ? Color.Black : Color.White);
             g.FillPath(brush, path);
         }
-        var element = state.Kind switch
-        {
-            ChromeKind.DuoRailClosed => Closed,
-            ChromeKind.DuoRailOpen => Open,
-            ChromeKind.DuoCorner => Corner,
-            _ => null,
-        };
+        var element = ElementFor(state.Kind);
         if (element == null) return;
-        PointF At(float fromRight, float fromTop) => new(screen.Right - fromRight * pt, screen.Top + fromTop * pt);
-        if (state.Kind == ChromeKind.DuoRailClosed)
+        PointF At(float fromRight, float y) => new(screen.Right - fromRight * pt, element.FromBottom ? screen.Bottom - y * pt : screen.Top + y * pt);
+        if (state.Kind is ChromeKind.DuoRailClosed or ChromeKind.DuoRailTent)
         {
             // The outer camera: a black hole in the screen, whatever the app shows.
             using var camera = new SolidBrush(Color.Black);

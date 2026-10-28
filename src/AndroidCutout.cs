@@ -177,7 +177,7 @@ internal static class AndroidCutout
     }
 
     /// <summary>What <see cref="ApplyDuo"/> installs, recorded so a restart of this app does not install it again.</summary>
-    public static string DuoSignature(DuoSafeAreas areas) => $"duo-v5|{areas}";
+    public static string DuoSignature(DuoSafeAreas areas) => $"duo-v6|{areas}";
 
     /// <summary>
     /// The iPhone Duo's part. Android's status bar is emptied (no clock, no notification icons) and 0 px tall, so the
@@ -196,9 +196,12 @@ internal static class AndroidCutout
             $"    <dimen name=\"waterfall_display_top_edge_size\">{natural.Top}px</dimen>\n" +
             $"    <dimen name=\"waterfall_display_right_edge_size\">{natural.Right}px</dimen>\n" +
             $"    <dimen name=\"waterfall_display_bottom_edge_size\">{natural.Bottom}px</dimen>\n";
+        // Which set a display gets: tent is the only one under 500 dp tall (678 x 466), the open display upright the only
+        // portrait one 600 dp wide; closed, open and book are the rest (h500dp).
         var folders = new List<(string?, string)>
         {
-            (null, "    <dimen name=\"status_bar_height_default\">0px</dimen>\n" + Waterfall(areas.RailNatural)),
+            (null, "    <dimen name=\"status_bar_height_default\">0px</dimen>\n" + Waterfall(areas.TentNatural)),
+            ("h500dp", Waterfall(areas.RailNatural)),
             ("w600dp-port", $"    <dimen name=\"status_bar_height_default\">{areas.UprightTop}px</dimen>\n" + Waterfall(areas.UprightNatural)),
         };
         if (InstallOverlay(instance, FrameworkOverlay, "android", "Device frame cutout", folders, sdkRoot) is { } error) return error;

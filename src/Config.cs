@@ -88,7 +88,7 @@ internal sealed class AppConfig
     /// <summary>Half opens the iPhone Duo like a book, or opens it flat again. Empty disables the hotkey.</summary>
     public string DuoHalfHotkey { get; set; } = "Ctrl+Alt+B";
 
-    /// <summary>Modifiers for the five pose hotkeys, followed by 1 to 5 (closed, open, book, open portrait, tabletop).</summary>
+    /// <summary>Modifiers for the six pose hotkeys, followed by 1 to 6 (closed, open, book, open portrait, tabletop, tent).</summary>
     public string DuoPoseHotkeys { get; set; } = "Ctrl+Alt";
 
     /// <summary>The pose control beside an iPhone Duo frame.</summary>

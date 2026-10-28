@@ -34,7 +34,7 @@ internal static class Program
         //   --duo-fold / --duo-unfold / --duo-half [name]
         //                                      iPhone Duo closed, open flat or half open (book), through the running tray
         //                                      app so the frame follows (active or named emulator); without it, adb directly
-        //   --duo-pose <closed|open|book|portrait|tabletop> [name]   any of the five poses
+        //   --duo-pose <closed|open|book|portrait|tabletop|tent> [name]   any of the six poses
         if (args.Length is 2 or 3 && args[0] == "--duo-pose")
         {
             if (IPhoneDuo.ParseCliName(args[1]) is not { } chosen) { Log.Write($"--duo-pose: unknown pose '{args[1]}'"); return 2; }

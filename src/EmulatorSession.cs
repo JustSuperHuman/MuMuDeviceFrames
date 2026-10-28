@@ -26,6 +26,7 @@ internal sealed class EmulatorSession : IDisposable
     private DuoPose? _animationTarget;
     private bool _afterCaptured;
     private DateTime _afterNotBefore;
+    private DateTime? _afterShownAt;
     private System.Windows.Forms.Timer? _afterTimer;
     private bool _warmed;
     private RenderedFrame? _current;
@@ -140,6 +141,7 @@ internal sealed class EmulatorSession : IDisposable
     {
         if (_disposed || IsGone) return;
         if (!IsWindow(Render)) Render = FindChildByClass(Main, RenderClass);
+        KeepHiddenUnderAnimation();
 
         var config = _app.Config;
         var instance = config.Instance(Title);
@@ -532,8 +534,8 @@ internal sealed class EmulatorSession : IDisposable
             if (before == null) return false;
             var beforeScreen = new RectangleF(overlay.Position.X, overlay.Position.Y, _shown.Width, _shown.Height);
 
-            // Where the new pose will be: MuMu turns its window for the upright poses, so predict it about the same centre.
-            bool turns = IPhoneDuo.IsUpright(to) != IPhoneDuo.IsUpright(from);
+            // Where the new pose will be: MuMu turns its window for the upright poses and tent, so predict it about the same centre.
+            bool turns = IPhoneDuo.TurnsWindow(to) != IPhoneDuo.TurnsWindow(from);
             var render = turns ? new Size(RenderSize.Height, RenderSize.Width) : RenderSize;
             if (_app.Library.Find(IPhoneDuo.FrameKey(to)) is not { } frame || IPhoneDuo.PictureInRender(to, render) is not { } picture) return false;
             var rendered = FrameRenderer.Render(frame, new RenderKey(frame.Key, picture.Width, picture.Height, Math.Clamp(_app.Config.Overlap, 0, 8)));
@@ -557,19 +559,17 @@ internal sealed class EmulatorSession : IDisposable
             string? dump = _app.Config.DuoAnimationDump is { Length: > 0 } folder ? Path.Combine(folder, $"{DateTime.Now:HHmmss}-{from}-{to}") : null;
             var animation = new FoldAnimation(Main, from, to, new FoldAnimation.End(before, beforeScreen), new FoldAnimation.End(placeholder, afterScreen), hinge, dump);
             animation.Landed += () => _app.Post(() => OnAnimationLanded(animation));
+            // The live device goes once the animation is over it: hiding it first left a frame or two with neither.
+            animation.Shown += () => _app.Post(() =>
+            {
+                if (_animation == animation) Sync();
+            });
             _animation = animation;
             _animationTarget = to;
             _afterCaptured = false;
             _afterNotBefore = DateTime.MaxValue;
+            _afterShownAt = null;
             animation.Start();
-            // The animation is the device for now: the frame and the live picture go away under it.
-            _overlay?.SetVisible(false);
-            _glass?.SetVisible(false);
-            _chrome?.SetVisible(false);
-            _fade?.SetVisible(false);
-            _region = null;
-            EmulatorClip.Hide(Main, new Point((rr.Left + rr.Right) / 2 - wr.Left, (rr.Top + rr.Bottom) / 2 - wr.Top));
-            PlacePictureSoon();
             Log.Write($"'{Title}': animating {from} -> {to}{(dump != null ? $" (frames to {dump})" : "")}");
             return true;
         }
@@ -648,9 +648,13 @@ internal sealed class EmulatorSession : IDisposable
     /// <summary>While the animation plays: keep the emulator hidden, and give it the new picture once it is there.</summary>
     private void FeedAnimation(RenderKey key, RECT wr, RECT rr, Rectangle picture, bool settling)
     {
+        if (!_animation!.OnScreen) return; // the live device stays until the animation covers it (Shown syncs again)
+        // The animation is the device for now: the frame and the live picture go away under it (the emulator itself
+        // in KeepHiddenUnderAnimation).
         _overlay?.SetVisible(false);
         _glass?.SetVisible(false);
         _chrome?.SetVisible(false);
+        _fade?.SetVisible(false);
         // Nothing for the old pose and nothing on a size on the way: the frame that matters is the new pose's, once
         // Android has switched and MuMu has finished turning its window for it.
         if (settling || Pose != _animationTarget) return;
@@ -663,19 +667,49 @@ internal sealed class EmulatorSession : IDisposable
         var screen = new RectangleF(rr.Left + picture.X - _current.RenderOffset.X, rr.Top + picture.Y - _current.RenderOffset.Y, _current.Width, _current.Height);
         bool arrived = Pose == _animationTarget && _animationTarget is { } target && IPhoneDuo.PictureInRender(target, RenderSize) != null;
         if (!arrived || DateTime.UtcNow < _afterNotBefore) return;
+        // Hidden behind its one-pixel region, the emulator stops giving PrintWindow its new pictures (it keeps the one
+        // from before), so the capture came out black. Once the animated device rests where it lands, show the
+        // emulator's screen again under it (the animation's dark screen covers it exactly), on every pass in case
+        // something took the region away, and take the picture from there.
+        if (!_animation.AtRest) return; // the 150 ms tick comes back
+        if (_app.Config.ClipToScreen && !Peek) ApplyRegion(new Point(rr.Left - wr.Left + picture.X, rr.Top - wr.Top + picture.Y));
+        else if (_afterShownAt == null) EmulatorClip.Remove(Main); // unclipped, as the live view shows it
         if (_afterCaptured)
         {
-            _animation!.Retarget(screen);
+            _animation.Retarget(screen);
             return;
         }
+        if (_afterShownAt == null)
+        {
+            _afterShownAt = DateTime.UtcNow;
+            return; // MuMu draws into it first
+        }
         _pictureOnScreen = new Rectangle(rr.Left + picture.X, rr.Top + picture.Y, picture.Width, picture.Height);
-        // Android blanks the screen for a moment as it switches; take the picture once there is one (the 150 ms tick
-        // keeps coming back here), or after a second whatever it shows.
-        if (Composite(_current, wr, _pictureOnScreen, out bool blank) is { } after && (!blank || DateTime.UtcNow > _afterNotBefore.AddSeconds(1)))
+        // Android blanks the screen for a moment as it switches (and for longer when the safe areas are refreshed with
+        // the display off and on); take the picture once there is one (the 150 ms tick keeps coming back here), or after
+        // a second and a half whatever it shows.
+        if (Composite(_current, wr, _pictureOnScreen, out bool blank) is { } after && (!blank || DateTime.UtcNow > _afterShownAt.Value.AddSeconds(1.5)))
         {
             _afterCaptured = true;
-            _animation!.SetAfter(after, screen);
+            _animation.SetAfter(after, screen);
         }
+    }
+
+    /// <summary>
+    /// While the animation is the device, until the new picture is wanted, the emulator stays hidden behind a one-pixel
+    /// region. Checked first thing on every pass: MuMu takes the region away when it turns its window, and the theming
+    /// layer can answer ours with its own, either of which shows MuMu's whole window round the animation.
+    /// </summary>
+    private void KeepHiddenUnderAnimation()
+    {
+        if (_animation is not { OnScreen: true } || _afterShownAt != null || EmulatorClip.IsHidden(Main) || !GetWindowRect(Main, out var wr)) return;
+        var centre = GetWindowRect(Render, out var rr)
+            ? new Point((rr.Left + rr.Right) / 2 - wr.Left, (rr.Top + rr.Bottom) / 2 - wr.Top)
+            : new Point(wr.Width / 2, wr.Height / 2);
+        _region = null;
+        EmulatorClip.Hide(Main, centre);
+        PlacePictureSoon();
+        StartVerifyBurst(); // look again shortly: the theming layer answers a region change
     }
 
     private void OnAnimationLanded(FoldAnimation animation)
@@ -699,7 +733,7 @@ internal sealed class EmulatorSession : IDisposable
         {
             foreach (var pose in IPhoneDuo.Poses)
             {
-                var render = IPhoneDuo.IsUpright(pose) == size.Width < size.Height ? size : new Size(size.Height, size.Width);
+                var render = IPhoneDuo.TurnsWindow(pose) == size.Width < size.Height ? size : new Size(size.Height, size.Width);
                 if (library.Find(IPhoneDuo.FrameKey(pose)) is { } frame && IPhoneDuo.PictureInRender(pose, render) is { } picture)
                     FrameRenderer.Render(frame, new RenderKey(frame.Key, picture.Width, picture.Height, overlap));
             }
@@ -729,8 +763,9 @@ internal sealed class EmulatorSession : IDisposable
         }
         // The device's outline: the picture plus the bezel (and the hinge barrel on the closed phone's left).
         double sx = (double)_pictureOnScreen.Width / Frame.Screen.Width;
-        int border = (int)Math.Round(DuoFrames.Border * sx), hinge = Pose == DuoPose.Folded ? (int)Math.Round(DuoFrames.HingeOut * sx) : 0;
-        var device = Rectangle.FromLTRB(_pictureOnScreen.Left - border - hinge, _pictureOnScreen.Top - border, _pictureOnScreen.Right + border, _pictureOnScreen.Bottom + border);
+        int border = (int)Math.Round(DuoFrames.Border * sx), hinge = (int)Math.Round(DuoFrames.HingeOut * sx);
+        int left = Pose == DuoPose.Folded ? hinge : 0, top = Pose == DuoPose.Tent ? hinge : 0; // the barrel: left closed, on top in tent
+        var device = Rectangle.FromLTRB(_pictureOnScreen.Left - border - left, _pictureOnScreen.Top - border - top, _pictureOnScreen.Right + border, _pictureOnScreen.Bottom + border);
         uint dpi = GetDpiForWindow(Main);
         _panel.Show(device, _animationTarget is { } going && _animation != null ? going : Pose, IsFoldable, dpi == 0 ? 1f : dpi / 96f);
         WarmDuoFrames();
@@ -1269,13 +1304,18 @@ internal sealed class EmulatorSession : IDisposable
     {
         var (instance, display) = (Instance!, Display!);
         var frame = _app.Library.Find(IPhoneDuo.FrameKey(pose));
-        // MuMu turns its window for the upright poses (same scale, swapped round): render for where it will be.
-        var turned = IPhoneDuo.IsUpright(pose) == RenderSize.Width < RenderSize.Height ? RenderSize : new Size(RenderSize.Height, RenderSize.Width);
+        // MuMu turns its window for the upright poses and tent (same scale, swapped round): render for where it will be.
+        var turned = IPhoneDuo.TurnsWindow(pose) == RenderSize.Width < RenderSize.Height ? RenderSize : new Size(RenderSize.Height, RenderSize.Width);
         RenderKey? key = frame != null && IPhoneDuo.PictureInRender(pose, turned) is { } picture
             ? new RenderKey(frame.Key, picture.Width, picture.Height, Math.Clamp(_app.Config.Overlap, 0, 8))
             : null;
         _nextPosePoll = DateTime.UtcNow.AddSeconds(4);
-        bool refresh = _app.Config.Instance(Title).DuoOverlay != null;
+        // Only a switch between safe-area sets (the rail poses, the upright ones, tent) needs the display off and on
+        // (apps pause and resume around it, and some take a moment to redraw).
+        bool refresh = _app.Config.Instance(Title).DuoOverlay != null && (Pose is not { } before || IPhoneDuo.SafeAreaGroup(before) != IPhoneDuo.SafeAreaGroup(pose));
+        // Tent's rail lies on the panel edge that rotation 90 shows on top, and SystemUI sizes the status bar at the
+        // rotation change, before the refresh: turning 270 and back after it makes SystemUI size it again.
+        bool resizeStatusBar = refresh && Pose == DuoPose.Tent && IPhoneDuo.RotationFor(pose, display.Native.Width < display.Native.Height) == 1;
         bool animating = Pose is { } from && from != pose && BeginAnimation(from, pose);
         _fadeNext = !animating;
         RunAndroidTask(() =>
@@ -1283,6 +1323,7 @@ internal sealed class EmulatorSession : IDisposable
             var rendered = key is { } k ? FrameRenderer.Render(frame!, k) : null;
             var commands = IPhoneDuo.Commands(pose, display.Native, display.Duo?.Foldable == true);
             if (refresh) commands = [.. commands, IPhoneDuo.RefreshSafeAreas];
+            if (resizeStatusBar) commands = [.. commands, "wm user-rotation lock 3", "sleep 0.3", "wm user-rotation lock 1"];
             var (_, output) = instance.Shell(string.Join("; ", commands));
             var now = MuMuControl.QueryDisplay(instance);
             return () =>
@@ -1334,9 +1375,10 @@ internal sealed class EmulatorSession : IDisposable
                 var pose = IPhoneDuo.Detect(display);
                 if (pose is { } now && now == _app.Config.Instance(Title).DuoPose && IPhoneDuo.InStep(now, display)) _resyncAttempts = 0;
                 if (pose == Pose) return;
+                bool regroup = Pose is not { } was || pose is not { } now2 || IPhoneDuo.SafeAreaGroup(was) != IPhoneDuo.SafeAreaGroup(now2);
                 SetPose(pose);
                 AdoptPose();
-                if (_app.Config.Instance(Title).DuoOverlay != null) RunAndroidTask(() => { instance.Shell(IPhoneDuo.RefreshSafeAreas); return () => { }; });
+                if (regroup && _app.Config.Instance(Title).DuoOverlay != null) RunAndroidTask(() => { instance.Shell(IPhoneDuo.RefreshSafeAreas); return () => { }; });
                 Sync();
             };
         });

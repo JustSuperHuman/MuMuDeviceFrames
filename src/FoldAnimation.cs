@@ -57,7 +57,7 @@ internal sealed class FoldAnimation : IDisposable
     private readonly double _duration;
     private readonly string? _dumpFolder;
     private Thread? _thread;
-    private volatile bool _fadeOut, _stop;
+    private volatile bool _fadeOut, _stop, _atRest, _onScreen;
     private bool _landed;
 
     /// <summary>Raised on the animation thread once the device has landed and the real after picture is in.</summary>
@@ -65,13 +65,22 @@ internal sealed class FoldAnimation : IDisposable
 
     public bool Running => _thread is { IsAlive: true };
 
+    /// <summary>The device is on screen in its new place and shape, holding there until the new picture is in.</summary>
+    public bool AtRest => _atRest;
+
+    /// <summary>The first frame has been composited: the live device under it can go.</summary>
+    public bool OnScreen => _onScreen;
+
+    /// <summary>Raised on the animation thread once the first frame is on screen.</summary>
+    public event Action? Shown;
+
     public FoldAnimation(IntPtr owner, DuoPose from, DuoPose to, End before, End afterPlaceholder, float hingeWidth, string? dumpFolder)
     {
         _owner = owner;
         _from = from;
         _to = to;
-        _fromShape = ShapeOf(from);
-        _toShape = ShapeOf(to);
+        _fromShape = ShapeOf(from, to);
+        _toShape = ShapeOf(to, from);
         _before = before;
         _after = afterPlaceholder;
         _target = afterPlaceholder.Screen;
@@ -94,7 +103,16 @@ internal sealed class FoldAnimation : IDisposable
         _bounds = Rectangle.Intersect(Rectangle.Round(union), screen);
     }
 
-    private static Shape ShapeOf(DuoPose pose) => !IPhoneDuo.IsInner(pose) ? Shape.Closed : IPhoneDuo.IsUpright(pose) ? Shape.Upright : Shape.Landscape;
+    /// <summary>
+    /// How an end of the switch animates. Tent is the closed phone turned landscape: it turns (from closed) or morphs
+    /// (to and from the open display) like a landscape screen, never swings open about a hinge on its side.
+    /// </summary>
+    private static Shape ShapeOf(DuoPose pose, DuoPose other) => pose switch
+    {
+        DuoPose.Tent => Shape.Landscape,
+        DuoPose.Folded when other == DuoPose.Tent => Shape.Upright,
+        _ => !IPhoneDuo.IsInner(pose) ? Shape.Closed : IPhoneDuo.IsUpright(pose) ? Shape.Upright : Shape.Landscape,
+    };
 
     /// <summary>Animations off in Windows (Settings, Accessibility, Visual effects): the switch is instant instead.</summary>
     public static bool SystemAllowsAnimation()
@@ -182,15 +200,22 @@ internal sealed class FoldAnimation : IDisposable
                 }
                 if (_dumpFolder != null) surface.Save(Path.Combine(_dumpFolder, $"{frame:D4}.png"), opacity);
                 frame++;
+                if (t >= 1) _atRest = true;
 
                 bool ready;
                 lock (_gate) ready = _afterReal && time - Math.Max(_afterArrived, 0) >= 0.12;
-                if (t >= 1 && !_landed && (ready || time > _duration + 1.6))
+                // A switch now ends with the display off and on (the safe areas), so the new picture can take ~1.5 s.
+                if (t >= 1 && !_landed && (ready || time > _duration + 2.6))
                 {
                     _landed = true;
                     Landed?.Invoke();
                 }
                 if (_dumpFolder == null) DwmFlush(); // one frame per compositor frame: no tearing, no stutter
+                if (!_onScreen)
+                {
+                    _onScreen = true;
+                    Shown?.Invoke();
+                }
                 PumpMessages();
             }
         }
@@ -287,11 +312,15 @@ internal sealed class FoldAnimation : IDisposable
             double e = Hinge(t);
             float turn = (float)(startTurn + (endTurn - startTurn) * e);
             float tilt = (float)(Math.Sin(Math.PI * Math.Clamp(t, 0, 1)) * (startTurn != endTurn ? 10 : 22) * Math.PI / 180);
-            float mix = (float)Smooth(0.25, 0.75, t) * wake;
+            // Cross-fade into the new pose's frame as the device turns or tilts; until the new picture is there its
+            // screen is dark (the placeholder), and the picture wakes in when it arrives. The old content stays
+            // bright early on, so it never lingers turned sideways.
+            float mix = (float)Smooth(0.25, 0.75, t);
+            float screenWake = 1 - mix + mix * wake;
             var landscapeTo = _toShape == Shape.Upright ? Sideways(after.Screen) : after.Screen;
             var rect = Lerp(fromRect, landscapeTo, (float)e);
             var finalUpright = _toShape == Shape.Upright ? after.Screen : _fromShape == Shape.Upright ? before.Screen : rect;
-            DrawInner(surface, origin, fromImage, toImage, mix, rect, finalUpright, turn, tilt, 1);
+            DrawInner(surface, origin, fromImage, toImage, mix, rect, finalUpright, turn, tilt, screenWake);
         }
     }
 
