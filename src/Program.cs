@@ -59,6 +59,14 @@ internal static class Program
             if (error != null) Log.Write($"'{args[1]}': Duo setup failed: {error}");
             return error == null ? 0 : 1;
         }
+        //   --menu-shot <emulator> <out.png> [light|dark] [scale] [recording-seconds]
+        //                                      the emulator's bezel menu drawn into a PNG by the running tray app
+        if (args.Length is >= 3 and <= 6 && args[0] == "--menu-shot")
+        {
+            double scale = args.Length > 4 && double.TryParse(args[4], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double s) ? s : 1;
+            int? recording = args.Length > 5 && int.TryParse(args[5], out int seconds) ? seconds : null;
+            return TrayApp.RequestMenuShotOfRunningInstance(args[1], Path.GetFullPath(args[2]), args.Length > 3 && args[3] == "dark", scale, recording) ? 0 : 1;
+        }
         //   --duo-create [name]                a new iPhone Duo emulator from nothing (default name "iPhone Duo")
         if (args.Length is 1 or 2 && args[0] == "--duo-create")
         {

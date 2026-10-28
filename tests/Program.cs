@@ -268,3 +268,27 @@ var tentPicture = (System.Drawing.Rectangle?)Call("IPhoneDuo", "PictureInRender"
 Check(tentPicture is { X: 0, Width: 769, Height: >= 527 and <= 529 }, $"Tent picture in MuMu's upright window: full width, centred ({tentPicture})");
 var tentNatural = (System.Runtime.CompilerServices.ITuple)areas.GetType().GetProperty("TentNatural")!.GetValue(areas)!;
 Check((int)tentNatural[2]! == 252 && (int)tentNatural[3]! == 102 && (int)tentNatural[1]! == 0, "Tent (rotation 0): rail on the panel's right edge, home indicator on its bottom, nothing on top");
+
+// The menu's geometry. Cells cut in whole pixels have to tile their area exactly at every scale, or a segment edge
+// lands on half a pixel and blurs; the pose bar's arrows must skip poses that cannot be chosen and must not wrap;
+// a recording's time reads like a clock.
+foreach (var (width, count, gap) in new[] { (374, 5, 6), (561, 5, 9), (370, 6, 0), (555, 6, 0), (740, 6, 0), (7, 3, 0) })
+{
+    var area = new System.Drawing.Rectangle(9, 4, width, 40);
+    var cells = (System.Drawing.Rectangle[])Call("MenuLayout", "Split", area, count, gap)!;
+    bool tiles = cells.Length == count && cells[0].Left == area.Left && cells[^1].Right == area.Right
+        && cells.Zip(cells.Skip(1)).All(p => p.Second.Left == p.First.Right + gap)
+        && cells.Max(c => c.Width) - cells.Min(c => c.Width) <= 1 && cells.All(c => c.Y == area.Y && c.Height == area.Height);
+    Check(tiles, $"Menu cells: {count} across {width} px with {gap} px gaps tile it exactly, widths within 1 px");
+}
+var block = (System.Drawing.Rectangle)Call("MenuLayout", "Block", new System.Drawing.Size(398, 70), 6, 6)!;
+Check(block == new System.Drawing.Rectangle(6, 3, 386, 64), "Menu block: the side inset of a row highlight, half the gap above and below");
+bool[] poseEnabled = [true, true, false, true, false, true];
+int Step(int from, int delta, bool[] enabled) => (int)Call("MenuLayout", "Step", from, delta, enabled.ToList())!;
+Check(Step(1, 1, poseEnabled) == 3 && Step(3, 1, poseEnabled) == 5 && Step(3, -1, poseEnabled) == 1,
+    "Pose bar arrows skip book and tabletop when the emulator cannot half open");
+Check(Step(5, 1, poseEnabled) == 5 && Step(0, -1, poseEnabled) == 0, "Pose bar arrows stop at the ends instead of wrapping");
+Check(Step(2, 1, [false, false, false]) == 2 && Step(-1, 1, poseEnabled) == 0 && Step(6, -1, poseEnabled) == 5,
+    "Pose bar arrows stay put with nothing to choose, and enter from either end");
+foreach (var (seconds, text) in new[] { (0, "0:00"), (42, "0:42"), (65, "1:05"), (3599, "59:59"), (3600, "1:00:00"), (3723, "1:02:03"), (-5, "0:00") })
+    Check((string)Call("MenuLayout", "Elapsed", TimeSpan.FromSeconds(seconds))! == text, $"Recording time {seconds} s reads {text}");

@@ -78,7 +78,7 @@ internal sealed class TrayApp : ApplicationContext
         Config = AppConfig.Load();
         Library = FrameLibrary.Load(Config.FramesRoot);
 
-        _window = new HiddenWindow(OnHotkey, RunExpoAction, RecordFrameByName, SetDuoPoseByName, SetFrameByName, MarkDuoCreating, ExitThread);
+        _window = new HiddenWindow(OnHotkey, RunExpoAction, RecordFrameByName, SetDuoPoseByName, SetFrameByName, MarkDuoCreating, MenuShot, ExitThread);
         RegisterHotkeys();
 
         _trayMenu.Opening += (_, _) => BuildMenu(_trayMenu, null);
@@ -452,52 +452,37 @@ internal sealed class TrayApp : ApplicationContext
         // Everyday actions sit at the top, one click away.
         bool canShoot = connected && session.Frame != null;
         items.Add(new MenuTiles(
-            new Tile("Copy", CopyGlyph, MenuTiles.Blue, MenuTiles.BlueDark, () => CopyScreenshot(session), canShoot, "Copy framed screenshot"),
-            new Tile("Save", SaveGlyph, MenuTiles.Green, MenuTiles.GreenDark, () => SaveScreenshot(session), canShoot, "Save framed screenshot as PNG"),
-            new Tile("Reload", RefreshGlyph, MenuTiles.Orange, MenuTiles.OrangeDark, () => RunExpoAction(ExpoAction.Reload, session), connected,
+            new Tile("Copy", CopyGlyph, () => CopyScreenshot(session), canShoot, "Copy framed screenshot"),
+            new Tile("Save", SaveGlyph, () => SaveScreenshot(session), canShoot, "Save framed screenshot as PNG"),
+            new Tile("Reload", RefreshGlyph, () => RunExpoAction(ExpoAction.Reload, session), connected,
                 $"Reload Expo app  {Config.ExpoReloadHotkey}".TrimEnd()),
-            new Tile("Dev gear", DevGlyph, MenuTiles.Purple, MenuTiles.PurpleDark, () => RunExpoAction(ExpoAction.ToggleGear, session), connected,
+            new Tile("Dev gear", DevGlyph, () => RunExpoAction(ExpoAction.ToggleGear, session), connected,
                 $"Show/hide Expo dev menu gear  {Config.ExpoGearHotkey}".TrimEnd()),
-            new Tile("Close apps", CloseAppsGlyph, MenuTiles.Red, MenuTiles.RedDark, () => CloseApps(session), connected,
-                "Close every app running in this emulator")));
+            new Tile("Close apps", CloseAppsGlyph, () => CloseApps(session), connected,
+                "Close every app running in this emulator", Destructive: true)));
 
-        if (session.IsDuoSurface || IPhoneDuo.IsDuo(session.Frame))
+        bool duo = session.IsDuoSurface || IPhoneDuo.IsDuo(session.Frame);
+        if (duo)
         {
-            // iPhone Duo: the five poses. Each switch is live, no restart.
+            // iPhone Duo: the six poses as one selector. Each switch is live, no restart. Only a foldable can tell apps
+            // it is half open; elsewhere book and tabletop would just be open.
             bool canFold = connected && session.IsDuoSurface;
-            foreach (var pose in IPhoneDuo.Poses)
+            items.Add(new MenuPoseBar(IPhoneDuo.Poses.Select(pose =>
             {
                 bool half = IPhoneDuo.IsHalf(pose);
-                items.Add(new MenuItem(pose switch { DuoPose.HalfOpen => "Book (half open)", DuoPose.Tabletop => "Tabletop (half open)", _ => IPhoneDuo.Variant(pose) },
-                    null, () => session.SetDuoPose(pose))
-                {
-                    // Only a foldable can tell apps it is half open; elsewhere it would just be open.
-                    Checked = session.Pose == pose, Enabled = canFold && (!half || session.IsFoldable),
-                    Hint = half && !session.IsFoldable ? "Needs Set up as iPhone Duo" : PoseHotkey(pose),
-                });
-            }
-            items.Add(new MenuItem("Check iPhone Duo…", null, () => CheckDuo(session)) { Enabled = connected, Hint = "Repairs" });
-            items.Add(Check("Animate folding", Config.DuoAnimations, () =>
-            {
-                Config.DuoAnimations = !Config.DuoAnimations;
-                Config.Save();
-            }, hint: FoldAnimation.SystemAllowsAnimation() ? null : "Windows animations are off"));
-            items.Add(Check("Show pose controls", Config.DuoPoseControls, () =>
-            {
-                Config.DuoPoseControls = !Config.DuoPoseControls;
-                Config.Save();
-                SyncAll();
-            }));
+                string tip = half && !session.IsFoldable ? "Needs Set up as iPhone Duo" : $"{IPhoneDuo.Describe(pose)}   {PoseHotkey(pose)}".TrimEnd();
+                return new PoseChoice(pose, IPhoneDuo.ShortName(pose), canFold && (!half || session.IsFoldable), tip);
+            }).ToList(), session.Pose, pose => session.SetDuoPose(pose)) { Enabled = canFold });
         }
 
         if (ShareXIntegration.FindCompatible(Config.ShareXExecutable) != null)
         {
-            items.Add(new MenuItem("Record entire frame", VideoGlyph, () => RecordFrame(session))
+            // Stop only while ShareX is recording; the time so far shows on the button.
+            var since = _menuShotRecording ?? ShareXIntegration.RecordingSince();
+            items.Add(new MenuRecordButton(since, $"{Math.Clamp(Config.RecordingPadding, 0, 500)} px padding", () => RecordFrame(session), StopFrameRecording)
             {
-                Enabled = session.Frame != null && Config.Enabled && instance.Enabled,
-                Hint = $"{Math.Clamp(Config.RecordingPadding, 0, 500)} px padding"
+                Enabled = since != null || session.Frame != null && Config.Enabled && instance.Enabled,
             });
-            items.Add(new MenuItem("Stop recording", null, StopFrameRecording));
         }
 
         items.Add(new MenuSeparator());
@@ -523,6 +508,24 @@ internal sealed class TrayApp : ApplicationContext
         var android = new MenuItem("Android display", DisplayGlyph);
         AddAndroidItems(android.DropDownItems, session, instance, connected);
         items.Add(android);
+        if (duo)
+        {
+            // The Duo's less frequent settings, out of the way of the pose bar.
+            var duoItems = new MenuItem("iPhone Duo", PhoneGlyph);
+            duoItems.DropDownItems.Add(new MenuItem("Check iPhone Duo…", null, () => CheckDuo(session)) { Enabled = connected, Hint = "Repairs" });
+            duoItems.DropDownItems.Add(Check("Animate folding", Config.DuoAnimations, () =>
+            {
+                Config.DuoAnimations = !Config.DuoAnimations;
+                Config.Save();
+            }, hint: FoldAnimation.SystemAllowsAnimation() ? null : "Windows animations are off"));
+            duoItems.DropDownItems.Add(Check("Show pose controls", Config.DuoPoseControls, () =>
+            {
+                Config.DuoPoseControls = !Config.DuoPoseControls;
+                Config.Save();
+                SyncAll();
+            }));
+            items.Add(duoItems);
+        }
         items.Add(new MenuItem("Minimize", MinimizeGlyph, () => PostMessageW(session.Main, WM_SYSCOMMAND, (IntPtr)SC_MINIMIZE, IntPtr.Zero)));
     }
 
@@ -772,6 +775,64 @@ internal sealed class TrayApp : ApplicationContext
             Log.Write($"ShareX recording failed: {ex}");
             Notify($"Could not start recording: {ex.Message}", warning: true);
             return false;
+        }
+    }
+
+    /// <summary>Set only while <c>--menu-shot</c> draws the menu as it looks during a recording that began then.</summary>
+    private DateTime? _menuShotRecording;
+
+    /// <summary>
+    /// <c>--menu-shot</c>: an emulator's bezel menu drawn into a PNG, in light or dark and at a scale (1 is 100 %), as
+    /// it would show on a monitor at that scale, with the rounded corners and border Windows adds. The same building
+    /// and drawing code as the real menu; only the theme and the scale are given instead of read (at another scale the
+    /// rows' own WinForms offsets are scaled by the renderer, as WinForms scales them on such a monitor).
+    /// </summary>
+    private bool MenuShot(string name, string path, bool dark, double scale, int? recordingSeconds)
+    {
+        var target = FindTarget(name);
+        if (target == null) return false;
+        MenuStyle.PreviewDark = dark;
+        MenuStyle.PreviewScale = scale;
+        _menuShotRecording = recordingSeconds is { } seconds ? DateTime.Now - TimeSpan.FromSeconds(seconds) : null;
+        try
+        {
+            using var menu = new ContextMenuStrip();
+            _ = menu.Handle;
+            BuildMenu(menu, target);
+            // Laid out the way it is on screen: shown, but fully transparent, in the corner of the screen.
+            menu.Opacity = 0;
+            menu.Show(Screen.PrimaryScreen!.WorkingArea.Location);
+            var size = menu.Size;
+            using var plain = new Bitmap(size.Width, size.Height, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+            menu.DrawToBitmap(plain, new Rectangle(Point.Empty, size));
+            var palette = (menu.Renderer as MenuRenderer)!.Palette;
+            int radius = (int)Math.Round(8 * scale);
+            using var shot = new Bitmap(size.Width, size.Height, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+            using (var g = Graphics.FromImage(shot))
+            {
+                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                g.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.Half;
+                using var outline = MenuRenderer.RoundedRect(new Rectangle(0, 0, size.Width, size.Height), radius);
+                using (var brush = new TextureBrush(plain)) g.FillPath(brush, outline);
+                using var inner = MenuRenderer.RoundedRect(new Rectangle(0, 0, size.Width - 1, size.Height - 1), radius);
+                using var pen = new Pen(palette.Border);
+                g.DrawPath(pen, inner);
+            }
+            menu.Close();
+            shot.Save(path, System.Drawing.Imaging.ImageFormat.Png);
+            Log.Write($"Menu shot of '{target.Title}' ({(dark ? "dark" : "light")}, {scale:0.##}x{(recordingSeconds != null ? ", recording" : "")}) -> {path}");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Log.Write($"Menu shot failed: {ex}");
+            return false;
+        }
+        finally
+        {
+            MenuStyle.PreviewDark = null;
+            MenuStyle.PreviewScale = null;
+            _menuShotRecording = null;
         }
     }
 
@@ -1178,6 +1239,11 @@ internal sealed class TrayApp : ApplicationContext
     /// <summary>Folds or unfolds the iPhone Duo in the named (or active) emulator of the running tray app.</summary>
     public static bool RequestDuoPoseOfRunningInstance(DuoPose pose, string? name) => SendToRunningInstance(HiddenWindow.DuoPoseData + (int)pose, name);
 
+    /// <summary>Draws an emulator's bezel menu into a PNG through the running tray app (<c>--menu-shot</c>).</summary>
+    public static bool RequestMenuShotOfRunningInstance(string name, string path, bool dark, double scale, int? recordingSeconds) =>
+        SendToRunningInstance(HiddenWindow.MenuShotData, string.Join('\u0001', name, path, dark ? "dark" : "light",
+            scale.ToString(System.Globalization.CultureInfo.InvariantCulture), recordingSeconds?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? ""));
+
     /// <summary>Tells the running tray app an iPhone Duo is being created under this name, or that it is over.</summary>
     public static bool RequestDuoCreatingOfRunningInstance(string name, bool creating) =>
         SendToRunningInstance(HiddenWindow.DuoCreatingData, (creating ? "1" : "0") + name);
@@ -1216,7 +1282,7 @@ internal sealed class TrayApp : ApplicationContext
         public const int WM_EXIT_REQUEST = 0x8000 + 1; // WM_APP + 1, posted by "MuMuDeviceFrames.exe --exit"
         public const int WM_EXPO_RELOAD = 0x8000 + 2, WM_EXPO_GEAR = 0x8000 + 3;
         /// <summary>WM_COPYDATA kinds; the payload is an emulator name (empty for the active one).</summary>
-        public const int RecordFrameData = 1, SetFrameData = 2, DuoCreatingData = 3, DuoPoseData = 10; // DuoPoseData + (int)pose
+        public const int RecordFrameData = 1, SetFrameData = 2, DuoCreatingData = 3, MenuShotData = 4, DuoPoseData = 10; // DuoPoseData + (int)pose
 
         private readonly Action<int> _onHotkey;
         private readonly Func<ExpoAction, bool> _onExpoAction;
@@ -1224,13 +1290,16 @@ internal sealed class TrayApp : ApplicationContext
         private readonly Func<string?, DuoPose?, bool> _onDuoPose;
         private readonly Func<string, string?, bool> _onSetFrame;
         private readonly Func<string, bool, bool> _onDuoCreating;
+        private readonly Func<string, string, bool, double, int?, bool> _onMenuShot;
         private readonly Action _onExit;
 
         public HiddenWindow(Action<int> onHotkey, Func<ExpoAction, bool> onExpoAction, Func<string?, bool> onRecordFrame,
-            Func<string?, DuoPose?, bool> onDuoPose, Func<string, string?, bool> onSetFrame, Func<string, bool, bool> onDuoCreating, Action onExit)
+            Func<string?, DuoPose?, bool> onDuoPose, Func<string, string?, bool> onSetFrame, Func<string, bool, bool> onDuoCreating,
+            Func<string, string, bool, double, int?, bool> onMenuShot, Action onExit)
         {
             _onSetFrame = onSetFrame;
             _onDuoCreating = onDuoCreating;
+            _onMenuShot = onMenuShot;
             _onHotkey = onHotkey;
             _onExpoAction = onExpoAction;
             _onRecordFrame = onRecordFrame;
@@ -1249,9 +1318,18 @@ internal sealed class TrayApp : ApplicationContext
             {
                 var data = System.Runtime.InteropServices.Marshal.PtrToStructure<COPYDATASTRUCT>(m.LParam);
                 bool pose = data.DataId >= DuoPoseData && data.DataId < DuoPoseData + IPhoneDuo.Poses.Length;
-                if ((data.DataId == RecordFrameData || data.DataId == SetFrameData || data.DataId == DuoCreatingData || pose) && data.Data != IntPtr.Zero && data.ByteCount is >= 2 and <= 1002 && data.ByteCount % 2 == 0)
+                if ((data.DataId == RecordFrameData || data.DataId == SetFrameData || data.DataId == DuoCreatingData || data.DataId == MenuShotData || pose)
+                    && data.Data != IntPtr.Zero && data.ByteCount is >= 2 and <= 1002 && data.ByteCount % 2 == 0)
                 {
                     string? name = System.Runtime.InteropServices.Marshal.PtrToStringUni(data.Data, data.ByteCount / 2 - 1);
+                    if (data.DataId == MenuShotData)
+                    {
+                        var p = name.Split('\u0001');
+                        m.Result = p.Length == 5 && double.TryParse(p[3], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double scale)
+                            && scale is >= 0.5 and <= 4
+                            && _onMenuShot(p[0], p[1], p[2] == "dark", scale, int.TryParse(p[4], out int seconds) ? seconds : null) ? (IntPtr)1 : IntPtr.Zero;
+                        return;
+                    }
                     if (data.DataId == DuoCreatingData)
                     {
                         m.Result = name.Length > 1 && _onDuoCreating(name[1..], name[0] == '1') ? (IntPtr)1 : IntPtr.Zero;

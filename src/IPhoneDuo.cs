@@ -73,6 +73,9 @@ internal static class IPhoneDuo
         _ => "Open",
     };
 
+    /// <summary>One word for a pose, under its icon in the menu's pose bar.</summary>
+    public static string ShortName(DuoPose pose) => pose == DuoPose.OpenPortrait ? "Portrait" : Variant(pose);
+
     /// <summary>Command-line names (<c>--duo-pose book</c>).</summary>
     public static string CliName(DuoPose pose) => pose switch
     {
