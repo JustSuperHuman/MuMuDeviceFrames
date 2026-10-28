@@ -220,11 +220,10 @@ Check((int)safeArea[0]! == 62 && (int)((System.Runtime.CompilerServices.ITuple)C
     "iOS status bar safe areas: 62 pt on the 17 Pro, 59 on the 15, 20 on Touch ID phones");
 Check(Call("DeviceSpecs", "IosSafeArea", "Android Phone", "Pixel 8") == null, "Android frames get no iOS safe area");
 
-// The Duo's upright bar: its items start where the 44 pt screen corner can no longer cut them (6 pt down, where the
-// glyphs begin, the arc is 44 - sqrt(44^2 - 38^2) = 21.8 pt in).
-var duoBar = Call("IosChrome", "DuoBarLayout", new System.Drawing.Size(1878, 2670), 480)!;
-int duoInset = (int)duoBar.GetType().GetProperty("Inset")!.GetValue(duoBar)!;
-Check(duoInset / 3.0 >= 44 - Math.Sqrt(44 * 44 - 38 * 38) + 4, $"Duo status bar items clear the screen corner ({duoInset / 3.0} pt in)");
+// The Duo's upright status element (open portrait, tabletop) reaches about 63 pt down, as on Apple's card (dots at
+// 59 to 61 pt): Android's top inset in those poses must clear it, and no further.
+float cornerBottom = (float)assembly.GetType("MuMuDeviceFrames.IosChrome")!.GetProperty("CornerBottom")!.GetValue(null)!;
+Check(cornerBottom is > 60 and < 66, $"Duo corner element ends {cornerBottom:0.0} pt down");
 // A device taller than the screen (iPhone 8 at MuMu's default window: 910 x 1817 on a 1392 px work area) shrinks MuMu's
 // picture so the whole device fits, rather than hanging under the taskbar.
 var fits = (System.Drawing.Size?)Call("DeviceAnchor", "PictureToFit", new System.Drawing.Size(720, 1281), new System.Drawing.Size(910, 1817), new System.Drawing.Rectangle(0, 0, 5120, 1392));

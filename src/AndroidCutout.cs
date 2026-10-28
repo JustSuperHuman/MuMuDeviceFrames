@@ -163,14 +163,22 @@ internal static class AndroidCutout
             ?? InstallOverlay(instance, SystemUiOverlay, "com.android.systemui", "Device frame status bar", systemUi.ToString(), sdkRoot);
     }
 
+    /// <summary>What <see cref="ApplyDuo"/> installs, recorded so a restart of this app does not install it again.</summary>
+    public static string DuoSignature(int portraitStatusBar) => $"duo-v2|{portraitStatusBar}";
+
     /// <summary>
     /// The iPhone Duo's part: Android's status bar emptied (no clock, no notification icons) so the tool's iOS chrome is
-    /// all there is, and no cutout or status-bar size of its own (the app reserves the rail itself).
+    /// all there is, and in the upright poses a status bar <paramref name="portraitStatusBar"/> px tall, so apps start
+    /// below the status element in the top-trailing corner. Android 15 sizes the status bar from
+    /// status_bar_height_default resolved for the display's configuration: only the inner display upright is portrait
+    /// and at least 600 dp wide (626 dp; closed is 466 dp wide, open is landscape), so the value goes in
+    /// values-w600dp-port and the other poses keep Android's own height (the app keeps its rail clear itself). No
+    /// cutout: the window stays the display's full size in every pose.
     /// </summary>
-    public static string? ApplyDuo(MuMuInstance instance, string? sdkRoot)
+    public static string? ApplyDuo(MuMuInstance instance, string? sdkRoot, int portraitStatusBar)
     {
-        instance.Shell($"cmd overlay disable --user 0 {FrameworkOverlay}");
-        instance.Adb("uninstall", FrameworkOverlay);
+        string framework = $"    <dimen name=\"status_bar_height_default\">{portraitStatusBar}px</dimen>\n";
+        if (InstallOverlay(instance, FrameworkOverlay, "android", "Device frame cutout", framework, sdkRoot, "w600dp-port") is { } error) return error;
         const string values = "    <integer name=\"max_notif_static_icons\">0</integer>\n" +
                               "    <dimen name=\"overflow_dot_radius\">0px</dimen>\n" +
                               "    <dimen name=\"status_bar_clock_size\">0px</dimen>\n";
@@ -181,7 +189,8 @@ internal static class AndroidCutout
     /// Builds a resource overlay for <paramref name="target"/> from <c>values.xml</c> entries, signs it with the AOSP
     /// platform test key, installs and enables it, and checks Android really activated it. Null on success.
     /// </summary>
-    public static string? InstallOverlay(MuMuInstance instance, string package, string target, string label, string values, string? sdkRoot)
+    /// <param name="qualifier">Resource qualifier for the values (e.g. <c>w600dp-port</c>); null for every configuration.</param>
+    public static string? InstallOverlay(MuMuInstance instance, string package, string target, string label, string values, string? sdkRoot, string? qualifier = null)
     {
         var missing = AndroidTools.Missing(sdkRoot);
         if (missing.Count > 0) return $"Missing Android display tools: {string.Join(", ", missing)}. Use Install / repair Android display tools in the tray menu.";
@@ -197,7 +206,8 @@ internal static class AndroidCutout
         try
         {
             string dir = Path.Combine(work, package);
-            Directory.CreateDirectory(Path.Combine(dir, "res", "values"));
+            string folder = qualifier == null ? "values" : $"values-{qualifier}";
+            Directory.CreateDirectory(Path.Combine(dir, "res", folder));
             File.WriteAllText(Path.Combine(dir, "AndroidManifest.xml"),
                 $"""
                  <?xml version="1.0" encoding="utf-8"?>
@@ -206,7 +216,7 @@ internal static class AndroidCutout
                      <application android:hasCode="false" android:label="{label}" />
                  </manifest>
                  """);
-            File.WriteAllText(Path.Combine(dir, "res", "values", "values.xml"), $"<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<resources>\n{values}</resources>\n");
+            File.WriteAllText(Path.Combine(dir, "res", folder, "values.xml"), $"<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<resources>\n{values}</resources>\n");
 
             string compiled = Path.Combine(dir, "compiled.zip"), unsigned = Path.Combine(dir, "unsigned.apk"), aligned = Path.Combine(dir, "aligned.apk"), apk = Path.Combine(dir, "overlay.apk");
             var steps = new (string Name, Func<(int ExitCode, string Output)> Run)[]

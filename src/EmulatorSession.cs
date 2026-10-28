@@ -272,26 +272,34 @@ internal sealed class EmulatorSession : IDisposable
     {
         var state = CurrentChrome();
         bool duo = IPhoneDuo.IsDuo(Frame) && state != null;
-        if (duo != _duoBarHidden && Instance is { } instance && !_androidBusy)
+        if (duo != _duoBarHidden && Instance is { } instance && Display is { } display && !_androidBusy)
         {
-            // The Duo's iOS chrome replaces Android's status bar content in every pose.
+            // The Duo's iOS chrome replaces Android's status bar content in every pose; turned off, Android gets its
+            // own status bar back exactly as it was.
             _duoBarHidden = duo;
             var sdk = _app.Config.AndroidSdk;
+            var config = _app.Config.Instance(Title);
+            int portrait = (int)Math.Round(IosChrome.CornerInsetPt * (display.DensityOverride ?? display.Density) / 160.0);
+            string signature = AndroidCutout.DuoSignature(portrait);
+            bool install = duo && config.DuoOverlay != signature, remove = !duo && config.DuoOverlay != null;
             RunAndroidTask(() =>
             {
                 string? error = null;
                 if (duo)
                 {
                     AndroidStatusBar.Hide(instance);
-                    error = AndroidCutout.ApplyDuo(instance, sdk);
+                    if (install) error = AndroidCutout.ApplyDuo(instance, sdk, portrait);
                 }
                 else
                 {
                     AndroidStatusBar.Restore(instance);
+                    if (remove) AndroidCutout.Remove(instance);
                 }
                 bool dark = AndroidStatusBar.WantsDarkGlyphs(instance);
                 return () =>
                 {
+                    if (install && error == null || remove) config.DuoOverlay = install ? signature : null;
+                    if (install || remove) _app.Config.Save();
                     _chromeDark = dark;
                     Log.Write(error == null ? $"'{Title}': Android status bar {(duo ? "emptied for the iPhone Duo's chrome" : "back")}" : $"'{Title}': Duo status bar overlay: {error}");
                     Sync();

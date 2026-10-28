@@ -15,6 +15,9 @@ internal sealed class InstanceConfig
     /// <summary>What the installed overlays were built for; they are rebuilt when frame or display change.</summary>
     public string? InstalledCutout { get; set; }
 
+    /// <summary>The iPhone Duo's overlays installed on this emulator (<see cref="AndroidCutout.DuoSignature"/>).</summary>
+    public string? DuoOverlay { get; set; }
+
     /// <summary>Per-emulator override of <see cref="AppConfig.IosStatusBar"/>. Null = follow the global setting.</summary>
     public bool? IosStatusBar { get; set; }
 
