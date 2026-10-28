@@ -305,6 +305,7 @@ internal sealed class TrayApp : ApplicationContext
                 AddSessionItems(item.DropDownItems, session);
                 items.Add(item);
             }
+            items.Add(new MenuItem(_creatingDuo ? "Creating an iPhone Duo emulator…" : "Create iPhone Duo emulator…", PhoneGlyph, CreateDuo) { Enabled = !_creatingDuo });
             items.Add(new MenuSeparator());
             AddGlobalItems(items);
             items.Add(new MenuSeparator());
@@ -351,6 +352,43 @@ internal sealed class TrayApp : ApplicationContext
             padding.DropDownItems.Add(new MenuItem("Custom…", null, PromptRecordingPadding));
             items.Add(padding);
         }
+    }
+
+    private void CheckDuo(EmulatorSession session)
+    {
+        Notify($"{session.Title}: checking the iPhone Duo…");
+        session.RunDoctor(findings => MessageBox.Show(
+            string.Join("\n", findings.Select(f => f.ToString())),
+            $"iPhone Duo check: {session.Title}", MessageBoxButtons.OK,
+            findings.Any(f => f.Outcome == DuoDoctor.Outcome.Failed) ? MessageBoxIcon.Warning : MessageBoxIcon.Information));
+    }
+
+    private bool _creatingDuo;
+
+    /// <summary>A new iPhone Duo emulator from nothing, in the background, with progress as notifications.</summary>
+    private void CreateDuo()
+    {
+        if (_creatingDuo) return;
+        var answer = MessageBox.Show(
+            "Create a new MuMu emulator set up as an iPhone Duo?\n\n" +
+            "It runs Android 15 at 2670×2034 at 480 dpi and is an Android foldable (closed, book, open, open portrait and tabletop), " +
+            "with the Duo frame and its pose buttons. It takes a minute or two and restarts the new emulator once.",
+            "MuMu Device Frames", MessageBoxButtons.OKCancel, MessageBoxIcon.Question);
+        if (answer != DialogResult.OK) return;
+        _creatingDuo = true;
+        string? sdk = Config.AndroidSdk;
+        Task.Run(() =>
+        {
+            string? error;
+            string created;
+            try { error = DuoSetup.Create(null, sdk, text => Post(() => Notify($"iPhone Duo: {text}")), out created); }
+            catch (Exception ex) { (error, created) = (ex.Message, ""); }
+            Post(() =>
+            {
+                _creatingDuo = false;
+                Notify(error == null ? $"{created} is ready: an iPhone Duo, folded." : $"iPhone Duo not created: {error}", warning: error != null);
+            });
+        });
     }
 
     /// <summary>Housekeeping: frame downloads, config and startup.</summary>
@@ -406,6 +444,7 @@ internal sealed class TrayApp : ApplicationContext
                     Hint = half && !session.IsFoldable ? "Needs Set up as iPhone Duo" : PoseHotkey(pose),
                 });
             }
+            items.Add(new MenuItem("Check iPhone Duo…", null, () => CheckDuo(session)) { Enabled = connected, Hint = "Repairs" });
             items.Add(Check("Show pose controls", Config.DuoPoseControls, () =>
             {
                 Config.DuoPoseControls = !Config.DuoPoseControls;

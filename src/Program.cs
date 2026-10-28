@@ -59,6 +59,43 @@ internal static class Program
             if (error != null) Log.Write($"'{args[1]}': Duo setup failed: {error}");
             return error == null ? 0 : 1;
         }
+        //   --duo-create [name]                a new iPhone Duo emulator from nothing (default name "iPhone Duo")
+        if (args.Length is 1 or 2 && args[0] == "--duo-create")
+        {
+            var error = DuoSetup.Create(args.Length == 2 ? args[1] : null, AppConfig.Load().AndroidSdk, text => Say(text), out string created);
+            Say(error == null ? $"{created} is ready: an iPhone Duo, folded. Fold and unfold from its frame's pose buttons." : $"iPhone Duo not created: {error}");
+            return error == null ? 0 : 1;
+        }
+        //   --duo-doctor [name] [--check]      check every piece of an iPhone Duo emulator and repair what it can
+        if (args.Length >= 1 && args[0] == "--duo-doctor")
+        {
+            bool check = args.Contains("--check");
+            string? who = args.Skip(1).FirstOrDefault(a => a != "--check");
+            return RunDoctor(who, repair: !check);
+        }
+        //   --prepare                          draw the built-in frames now (the installer does, so the first start is quick)
+        if (args.Length == 1 && args[0] == "--prepare") return FrameLibrary.Load(AppConfig.Load().FramesRoot).Frames.Count > 0 ? 0 : 1;
+        //   --android-tools-check              exit 0 when the Android display tools (aapt2, apksigner, Java) are ready
+        if (args.Length == 1 && args[0] == "--android-tools-check")
+        {
+            var missing = AndroidTools.Missing(AppConfig.Load().AndroidSdk);
+            Say(missing.Count == 0 ? "Android display tools are ready." : $"Missing: {string.Join(", ", missing)}");
+            return missing.Count == 0 ? 0 : 1;
+        }
+        //   --remove-overlays                  take this app's Android overlays (cutout, status bar, postures) off running emulators
+        if (args.Length == 1 && args[0] == "--remove-overlays")
+        {
+            int count = 0;
+            foreach (var instance in MuMuControl.RunningInstances())
+            {
+                AndroidCutout.Remove(instance);
+                instance.Shell($"cmd overlay disable --user 0 {IPhoneDuo.PosturesOverlay}");
+                instance.Adb("uninstall", IPhoneDuo.PosturesOverlay);
+                count++;
+            }
+            Say($"Removed the overlays from {count} running emulator(s).");
+            return 0;
+        }
         //   --set-frame <name> <frame|auto>     choose an emulator's frame ("Category/Model/Variant"); with fit on, the
         //                                      emulator becomes that device
         if (args.Length == 3 && args[0] == "--set-frame")
@@ -177,6 +214,48 @@ internal static class Program
             Log.Write($"Expo {action} on '{name}' failed: {ex}");
             return 1;
         }
+    }
+
+    private static bool _console;
+
+    /// <summary>A line for whoever ran the command: the console it came from (this is a GUI app), and the log.</summary>
+    internal static void Say(string text)
+    {
+        if (!_console)
+        {
+            _console = true;
+            if (!Console.IsOutputRedirected) AttachConsole(-1); // ATTACH_PARENT_PROCESS
+        }
+        try { Console.WriteLine(text); } catch { /* no console */ }
+        Log.Write(text);
+    }
+
+    /// <summary>--duo-doctor: the named emulator, or the only running one on the iPhone Duo surface.</summary>
+    private static int RunDoctor(string? name, bool repair)
+    {
+        var config = AppConfig.Load();
+        MuMuInstance? instance = null;
+        if (name != null) instance = MuMuControl.LocateByName(name);
+        else
+        {
+            var duos = new List<(string Name, MuMuInstance Instance)>();
+            foreach (var running in MuMuControl.RunningInstances())
+                if (MuMuControl.QueryDisplay(running) is { } display && IPhoneDuo.IsSurface(display.Native)
+                    && MuMuControl.FindManager() is { } manager && MuMuControl.List(manager).FirstOrDefault(i => i.Index == running.Index).Name is { } found)
+                    duos.Add((found, running));
+            if (duos.Count == 1) (name, instance) = duos[0];
+            else
+            {
+                Say(duos.Count == 0 ? "No running iPhone Duo emulator found; name one: --duo-doctor <emulator>." : $"Several Duo emulators run ({string.Join(", ", duos.Select(d => d.Name))}); name one.");
+                return 2;
+            }
+        }
+        if (instance == null) { Say($"No running emulator named {name}."); return 2; }
+        Say($"Checking {name}{(repair ? " (and repairing)" : "")}…");
+        var findings = DuoDoctor.Run(instance, name!, config.Instance(name!).DuoPose, config.AndroidSdk, repair);
+        foreach (var finding in findings) Say(finding.ToString());
+        File.WriteAllLines(Path.Combine(AppConfig.Dir, "duo-doctor.txt"), findings.Select(f => f.ToString()));
+        return findings.Any(f => f.Outcome == DuoDoctor.Outcome.Failed) ? 1 : 0;
     }
 
     /// <summary>Fold or unfold without the tray app: the same wm commands, straight over adb.</summary>

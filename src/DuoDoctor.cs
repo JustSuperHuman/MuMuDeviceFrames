@@ -1,0 +1,105 @@
+namespace MuMuDeviceFrames;
+
+/// <summary>
+/// Health check for an iPhone Duo emulator: every piece the Duo needs, checked in order, repaired when it can be, and
+/// a line for each saying what was found or fixed. The structural pieces (surface, device states) repair through
+/// <see cref="DuoSetup"/>, which restarts the emulator; everything after that is live.
+/// </summary>
+internal static class DuoDoctor
+{
+    public enum Outcome { Ok, Fixed, Failed, Note }
+
+    public sealed record Finding(Outcome Outcome, string Text)
+    {
+        public override string ToString() => $"{Outcome switch { Outcome.Ok => "OK   ", Outcome.Fixed => "FIXED", Outcome.Failed => "FAIL ", _ => "NOTE " }} {Text}";
+    }
+
+    /// <param name="intended">The pose the tray app keeps this emulator in (from the config), if it has one.</param>
+    public static List<Finding> Run(MuMuInstance instance, string title, DuoPose? intended, string? sdkRoot, bool repair)
+    {
+        var findings = new List<Finding>();
+        void Add(Outcome outcome, string text)
+        {
+            findings.Add(new Finding(outcome, text));
+            Log.Write($"'{title}': Duo doctor: {new Finding(outcome, text)}");
+        }
+
+        var display = MuMuControl.QueryDisplay(instance);
+        if (display == null)
+        {
+            Add(Outcome.Failed, "Android is not answering over adb.");
+            return findings;
+        }
+
+        // 1. The structural pieces: MuMu's settings, the surface, the device states. Repairs restart the emulator.
+        string autoRotate = MuMuControl.GetSetting(instance, "window_auto_rotate") ?? "?";
+        bool surface = IPhoneDuo.IsSurface(display.Native) && display.Density == IPhoneDuo.Density;
+        bool foldable = display.Duo?.Foldable == true;
+        if (!surface || !foldable || autoRotate != "false")
+        {
+            string missing = string.Join(", ", new[]
+            {
+                surface ? null : $"surface (is {display.Native.Width}x{display.Native.Height} @ {display.Density} dpi)",
+                foldable ? null : "foldable device states",
+                autoRotate == "false" ? null : "MuMu window auto-rotate off",
+            }.Where(m => m != null));
+            if (!repair)
+            {
+                Add(Outcome.Failed, $"Not set up: {missing}.");
+                return findings;
+            }
+            if (DuoSetup.Run(instance, title, sdkRoot, _ => { }) is { } error)
+            {
+                Add(Outcome.Failed, $"Setup ({missing}): {error}");
+                return findings;
+            }
+            Add(Outcome.Fixed, $"Set up {missing} (restarted the emulator).");
+            display = MuMuControl.QueryDisplay(instance) ?? display;
+        }
+        else
+        {
+            Add(Outcome.Ok, $"Surface {IPhoneDuo.Surface.Width}x{IPhoneDuo.Surface.Height} at {IPhoneDuo.Density} dpi, MuMu window auto-rotate off.");
+            Add(Outcome.Ok, "Device states CLOSED (0), HALF_OPENED (1), OPENED (2).");
+        }
+
+        // 2. What apps need to get the fold: Jetpack's OEM library and the postures mapping.
+        string libraries = instance.Shell("pm list libraries").Output;
+        if (libraries.Contains("androidx.window.extensions")) Add(Outcome.Ok, "Window extensions library (androidx.window.extensions) is on the image.");
+        else Add(Outcome.Failed, "This Android image has no androidx.window.extensions: apps cannot get a FoldingFeature.");
+
+        string postures = instance.Shell("cmd overlay lookup android android:array/config_device_state_postures").Output;
+        bool posturesOk = postures.Contains("0:1") && postures.Contains("1:2") && postures.Contains("2:3");
+        if (posturesOk) Add(Outcome.Ok, "Postures overlay maps 0:1, 1:2, 2:3.");
+        else if (!repair) Add(Outcome.Failed, "Postures overlay missing.");
+        else if (DuoSetup.InstallPostures(instance, sdkRoot) is { } overlayError) Add(Outcome.Failed, $"Postures overlay: {overlayError}");
+        else Add(Outcome.Fixed, "Installed the postures overlay.");
+
+        // 3. The pose: display, rotation, device state and fold line all agreeing.
+        display = MuMuControl.QueryDisplay(instance) ?? display;
+        var shown = IPhoneDuo.Detect(display);
+        var pose = intended ?? shown ?? DuoPose.Folded;
+        string features = instance.Shell("settings get global display_features").Output.Trim();
+        string wantFeatures = IPhoneDuo.IsInner(pose) ? IPhoneDuo.FoldFeature(display.Native) : "null";
+        bool inStep = shown == pose && IPhoneDuo.InStep(pose, display) && features == wantFeatures && display.DensityOverride is null or IPhoneDuo.Density;
+        if (inStep)
+        {
+            Add(Outcome.Ok, $"Pose {IPhoneDuo.Variant(pose)}: {display.Duo?.Current?.Width}x{display.Duo?.Current?.Height}, device state {display.Duo?.FoldState}, fold line {(features == "null" ? "none" : features)}.");
+        }
+        else if (!repair)
+        {
+            Add(Outcome.Failed, $"Pose {IPhoneDuo.Variant(pose)} out of step (shows {shown?.ToString() ?? "no pose"}, sees {display.Duo?.Current}, state {display.Duo?.FoldState}, fold line {features}).");
+        }
+        else
+        {
+            instance.Shell(string.Join("; ", IPhoneDuo.Commands(pose, display.Native, foldable: true)));
+            var now = MuMuControl.QueryDisplay(instance);
+            if (IPhoneDuo.Detect(now) == pose && IPhoneDuo.InStep(pose, now)) Add(Outcome.Fixed, $"Put the pose back to {IPhoneDuo.Variant(pose)} (was {shown?.ToString() ?? "none"}, state {display.Duo?.FoldState}).");
+            else Add(Outcome.Failed, $"Could not put the pose back to {IPhoneDuo.Variant(pose)}.");
+        }
+
+        // 4. Notes: root and the tray app.
+        if (MuMuControl.GetSetting(instance, "root_permission") == "true") Add(Outcome.Note, "MuMu root permission is on (only the setup needs it).");
+        if (!TrayApp.IsRunning) Add(Outcome.Note, "The tray app is not running, so nothing heals the pose after an Android restart.");
+        return findings;
+    }
+}

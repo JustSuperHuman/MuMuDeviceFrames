@@ -76,6 +76,15 @@ internal static class DuoFrames
                 if (IsCurrent(dir)) frames.Add(Frame(root, pose)); // another process won the race
             }
         }
+        // Variants an older version drew under other names ("Half open" became "Book").
+        try
+        {
+            string model = Path.Combine(root, IPhoneDuo.Category, IPhoneDuo.Model);
+            var current = IPhoneDuo.Poses.Select(IPhoneDuo.Variant).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            foreach (var stale in Directory.GetDirectories(model).Where(d => !current.Contains(Path.GetFileName(d)) && !d.Contains(".tmp-")))
+                Directory.Delete(stale, recursive: true);
+        }
+        catch (Exception ex) { Log.Write($"Could not tidy old Duo frames: {ex.Message}"); }
         return frames;
     }
 

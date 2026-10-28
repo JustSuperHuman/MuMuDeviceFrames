@@ -758,6 +758,25 @@ internal sealed class EmulatorSession : IDisposable
         });
     }
 
+    /// <summary>The iPhone Duo health check (and repairs), in turn with this emulator's other adb work.</summary>
+    public void RunDoctor(Action<List<DuoDoctor.Finding>> done)
+    {
+        if (Instance is not { } instance) return;
+        var (title, pose, sdk) = (Title, _app.Config.Instance(Title).DuoPose, _app.Config.AndroidSdk);
+        RunAndroidTask(() =>
+        {
+            var findings = DuoDoctor.Run(instance, title, pose, sdk, repair: true);
+            var display = MuMuControl.QueryDisplay(instance);
+            return () =>
+            {
+                if (display != null) { Display = display; Pose = IPhoneDuo.Detect(display); }
+                _resyncAttempts = 0;
+                done(findings);
+                Sync();
+            };
+        });
+    }
+
     /// <summary>Retry after a failure, or rebuild on request.</summary>
     public void RetryCutout()
     {

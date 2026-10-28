@@ -5,3 +5,4 @@ publish/
 *.zip
 *.user
 .vs/
+installer/Output/

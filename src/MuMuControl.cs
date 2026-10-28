@@ -105,6 +105,82 @@ internal static class MuMuControl
         return any == 0 ? [] : Enumerate(any).Where(e => e.AndroidStarted).Select(e => Connect(e.Instance)!).ToList();
     }
 
+    /// <summary>
+    /// MuMuManager.exe, even with no emulator running (a fresh machine): next to a running emulator, else MuMu Player's
+    /// uninstall entry, else the default install folder. Null when MuMu Player 12 is not installed.
+    /// </summary>
+    public static string? FindManager()
+    {
+        uint any = AnyEmulatorPid();
+        if (any != 0)
+        {
+            try
+            {
+                using var process = Process.GetProcessById((int)any);
+                if (ManagerNear(process.MainModule?.FileName) is { } near) return near;
+            }
+            catch { /* fall through to the registry */ }
+        }
+        foreach (var hive in new[] { Microsoft.Win32.Registry.LocalMachine, Microsoft.Win32.Registry.CurrentUser })
+        {
+            using var uninstall = hive.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Uninstall");
+            foreach (var name in uninstall?.GetSubKeyNames() ?? [])
+            {
+                using var key = uninstall!.OpenSubKey(name);
+                if (key?.GetValue("DisplayName") is not string display || !display.Contains("MuMu", StringComparison.OrdinalIgnoreCase)) continue;
+                if (key.GetValue("InstallLocation") is string location && ManagerNear(Path.Combine(location, "x")) is { } found) return found;
+            }
+        }
+        string programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+        return ManagerNear(Path.Combine(programFiles, "Netease", "MuMuPlayer", "x"));
+    }
+
+    /// <summary>MuMuManager.exe in a folder or any folder above it (nx_main, shell or the root).</summary>
+    private static string? ManagerNear(string? file)
+    {
+        for (var dir = Path.GetDirectoryName(file ?? ""); !string.IsNullOrEmpty(dir); dir = Path.GetDirectoryName(dir))
+            if (new[] { @"nx_main\MuMuManager.exe", @"shell\MuMuManager.exe", "MuMuManager.exe" }.Select(rel => Path.Combine(dir, rel)).FirstOrDefault(File.Exists) is { } found)
+                return found;
+        return null;
+    }
+
+    /// <summary>Every MuMu instance: index, name, whether it runs.</summary>
+    public static List<(string Index, string Name, bool Running)> List(string manager)
+    {
+        var list = new List<(string, string, bool)>();
+        var (_, output) = ProcessRunner.Run(manager, ["info", "-v", "all"]);
+        try
+        {
+            int start = output.IndexOf('{'), end = output.LastIndexOf('}');
+            using var doc = JsonDocument.Parse(output[start..(end + 1)]);
+            var items = doc.RootElement.TryGetProperty("index", out _) ? [doc.RootElement] : doc.RootElement.EnumerateObject().Select(p => p.Value).ToArray();
+            foreach (var item in items)
+            {
+                if (!item.TryGetProperty("index", out var index)) continue;
+                list.Add((index.GetString() ?? "", item.TryGetProperty("name", out var n) ? n.GetString() ?? "" : "",
+                    item.TryGetProperty("is_process_started", out var started) && started.GetBoolean()));
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.Write($"Could not parse MuMuManager info: {ex.Message}");
+        }
+        return list;
+    }
+
+    /// <summary>The adb endpoint of one instance once it runs (MuMu gives it a port when it starts).</summary>
+    public static MuMuInstance? Instance(string manager, string index)
+    {
+        var (_, output) = ProcessRunner.Run(manager, ["info", "-v", index]);
+        var port = Regex.Match(output, "\"adb_port\"\\s*:\\s*(\\d+)");
+        if (!port.Success) return null;
+        var host = Regex.Match(output, "\"adb_host_ip\"\\s*:\\s*\"([^\"]+)\"");
+        string adb = Path.Combine(Path.GetDirectoryName(manager)!, "adb.exe");
+        if (!File.Exists(adb)) adb = AndroidSdk.Find("platform-tools", "adb.exe") ?? "adb";
+        var instance = new MuMuInstance(index, manager, adb, $"{(host.Success ? host.Groups[1].Value : "127.0.0.1")}:{port.Groups[1].Value}");
+        return Connect(instance);
+    }
+
     private static uint AnyEmulatorPid()
     {
         var names = AppConfig.Load().ProcessNames;

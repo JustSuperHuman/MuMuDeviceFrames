@@ -3,7 +3,8 @@
     Installs (or updates / removes) MuMu Device Frames for the current user.
 
 .DESCRIPTION
-    One line, no admin rights:
+    The easiest install is MuMuDeviceFrames-Setup.exe from the GitHub releases page (a normal Windows installer with
+    the same options). This script does the same from PowerShell. One line, no admin rights:
 
         irm https://raw.githubusercontent.com/JustSuperHuman/MuMuDeviceFrames/main/install.ps1 | iex
 
@@ -14,7 +15,8 @@
 
         & ([scriptblock]::Create((irm https://raw.githubusercontent.com/JustSuperHuman/MuMuDeviceFrames/main/install.ps1))) -NoStartup
         .\install.ps1 -Zip .\MuMuDeviceFrames-win-x64.zip     # install a local build
-        .\install.ps1 -Uninstall
+        .\install.ps1 -SetupDuo                                  # also create an iPhone Duo emulator
+        .\install.ps1 -Uninstall [-RemoveOverlays] [-RemoveSettings]
 #>
 [CmdletBinding()]
 param(
@@ -23,8 +25,13 @@ param(
     [string]$InstallDir = (Join-Path $env:LOCALAPPDATA 'Programs\MuMuDeviceFrames'),
     [switch]$NoStartup,
     [switch]$NoLaunch,
-    [switch]$InstallAndroidTools,  # optional interactive WinGet setup for safe areas / iOS status bar
-    [switch]$Uninstall
+    [switch]$InstallAndroidTools,  # interactive WinGet setup for safe areas, iOS status bar and iPhone Duo folding
+    [switch]$NoAndroidTools,       # never ask about the Android display tools
+    [switch]$SetupDuo,             # also create an iPhone Duo emulator (needs MuMu Player 12)
+    [string]$DuoName,              # its name (default "iPhone Duo")
+    [switch]$Uninstall,
+    [switch]$RemoveOverlays,       # with -Uninstall: take this app's Android overlays off running emulators
+    [switch]$RemoveSettings        # with -Uninstall: also delete %APPDATA%\MuMuDeviceFrames (settings, frames)
 )
 
 $ErrorActionPreference = 'Stop'
@@ -55,10 +62,15 @@ function Stop-Running {
 if ($Uninstall) {
     Stop-Running
     if (Test-Path $Exe) { Start-Process -FilePath $Exe -ArgumentList '--restore' -Wait -WindowStyle Hidden -ErrorAction SilentlyContinue }
+    if ($RemoveOverlays -and (Test-Path $Exe)) { (Start-Process -FilePath $Exe -ArgumentList '--remove-overlays' -PassThru -WindowStyle Hidden).WaitForExit() }
+    # Installed by MuMuDeviceFrames-Setup.exe? Its Apps & Features entry goes with the folder.
+    Remove-Item 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\{CFA81413-3A35-4172-BCCE-DC374580CE69}_is1' -Recurse -ErrorAction SilentlyContinue
+    if ($RemoveSettings) { Remove-Item (Join-Path $env:APPDATA 'MuMuDeviceFrames') -Recurse -Force -ErrorAction SilentlyContinue }
     Remove-ItemProperty -Path $RunKey -Name $RunValue -ErrorAction SilentlyContinue
     Remove-Item $Shortcut -Force -ErrorAction SilentlyContinue
     Remove-Item $InstallDir -Recurse -Force -ErrorAction SilentlyContinue
-    Write-Host "MuMu Device Frames removed. Settings and frames are kept in $env:APPDATA\MuMuDeviceFrames." -ForegroundColor Green
+    $kept = if ($RemoveSettings) { '' } else { " Settings and frames are kept in $env:APPDATA\MuMuDeviceFrames." }
+    Write-Host "MuMu Device Frames removed.$kept" -ForegroundColor Green
     return
 }
 
@@ -97,6 +109,21 @@ Step 'Downloading device frames (first run only, ~35 MB)'
 $download = Start-Process -FilePath $Exe -ArgumentList '--download' -Wait -PassThru -WindowStyle Hidden
 if ($download.ExitCode -ne 0) { Write-Warning "Some frames failed to download; the app will offer to retry. See $env:APPDATA\MuMuDeviceFrames\log.txt" }
 
+Step 'Drawing the built-in iPhone Duo frames'
+Start-Process -FilePath $Exe -ArgumentList '--prepare' -Wait -WindowStyle Hidden | Out-Null
+
+# The Android display tools (aapt2, apksigner, Java) build the overlays for safe areas, the iOS-style status bar and
+# iPhone Duo folding. Offer them when missing; -SetupDuo needs them.
+$toolsReady = (Start-Process -FilePath $Exe -ArgumentList '--android-tools-check' -Wait -PassThru -WindowStyle Hidden).ExitCode -eq 0
+if ($toolsReady) { $InstallAndroidTools = $false }
+elseif (-not $InstallAndroidTools -and -not $NoAndroidTools) {
+    if ($SetupDuo) { $InstallAndroidTools = $true }
+    elseif ([Environment]::UserInteractive -and $Host.Name -eq 'ConsoleHost') {
+        $answer = Read-Host 'Install the Android display tools now (safe areas, iOS-style status bar, iPhone Duo folding)? [y/N]'
+        $InstallAndroidTools = $answer -match '^(y|yes)$'
+    }
+}
+
 $shell = New-Object -ComObject WScript.Shell
 $link = $shell.CreateShortcut($Shortcut)
 $link.TargetPath = $Exe
@@ -130,6 +157,16 @@ if ($InstallAndroidTools) {
 if (-not $NoLaunch) {
     Step 'Starting MuMu Device Frames (look for it in the tray)'
     Start-Process -FilePath $Exe -WorkingDirectory $InstallDir
+}
+
+if ($SetupDuo) {
+    Step 'Creating the iPhone Duo emulator (a minute or two)'
+    $duoArgs = @('--duo-create')
+    if ($DuoName) { $duoArgs += "`"$DuoName`"" }
+    # Not -Wait: that also waits for the adb server the command may start, which never exits.
+    $duo = Start-Process -FilePath $Exe -ArgumentList $duoArgs -PassThru -WindowStyle Hidden
+    $duo.WaitForExit()
+    if ($duo.ExitCode -ne 0) { Write-Warning "The iPhone Duo was not created. See $env:APPDATA\MuMuDeviceFrames\log.txt" }
 }
 
 Write-Host "MuMu Device Frames installed: $Exe" -ForegroundColor Green

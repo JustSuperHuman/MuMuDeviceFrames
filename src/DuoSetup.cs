@@ -18,8 +18,68 @@ internal static class DuoSetup
     public static string? InstallPostures(MuMuInstance instance, string? sdkRoot) =>
         AndroidCutout.InstallOverlay(instance, IPhoneDuo.PosturesOverlay, "android", "iPhone Duo postures", IPhoneDuo.PosturesValues, sdkRoot);
 
+    /// <summary>MuMu runs this many emulators at most here: a seventh once took three others down with it.</summary>
+    public const int MaxRunning = 6;
+
+    /// <summary>
+    /// A brand-new iPhone Duo emulator from nothing: a new MuMu instance (Android 15) at the Duo surface with root on
+    /// for its first start, then everything <see cref="Run"/> does, ending folded with root off. One restart in all.
+    /// </summary>
+    public static string? Create(string? name, string? sdkRoot, Action<string> progress, out string created)
+    {
+        created = name ?? "";
+        var manager = MuMuControl.FindManager();
+        if (manager == null) return "MuMu Player 12 is not installed. Get it at https://www.mumuplayer.com/ and try again.";
+        var all = MuMuControl.List(manager);
+        if (all.Count(i => i.Running) >= MaxRunning) return $"{MaxRunning} MuMu emulators are running already; close one first.";
+        name = string.IsNullOrWhiteSpace(name) ? NextName(all.Select(i => i.Name)) : name.Trim();
+        created = name;
+        if (all.Any(i => string.Equals(i.Name, name, StringComparison.OrdinalIgnoreCase)))
+            return $"An emulator named {name} exists already. To make it an iPhone Duo, use --duo-setup \"{name}\".";
+
+        string index = (all.Select(i => int.TryParse(i.Index, out int n) ? n : -1).DefaultIfEmpty(-1).Max() + 1).ToString();
+        void Say(string text)
+        {
+            Log.Write($"'{name}': Duo create: {text}");
+            progress(text);
+        }
+
+        Say($"creating MuMu instance {index}");
+        var made = ProcessRunner.Run(manager, ["create", "-v", index, "-ver", "15"], 300_000).Output;
+        if (!made.Contains("\"errcode\": 0") && !made.Contains("\"errcode\":0")) return $"MuMu could not create the instance: {made.Trim()}";
+        ProcessRunner.Run(manager, ["rename", "-v", index, "-n", name]);
+        ProcessRunner.Run(manager, ["setting", "-v", index,
+            "-k", "resolution_mode", "-val", "custom",
+            "-k", "resolution_width.custom", "-val", IPhoneDuo.Surface.Width.ToString(),
+            "-k", "resolution_height.custom", "-val", IPhoneDuo.Surface.Height.ToString(),
+            "-k", "resolution_dpi.custom", "-val", IPhoneDuo.Density.ToString(),
+            "-k", "window_auto_rotate", "-val", "false",
+            "-k", "root_permission", "-val", "true"]);
+
+        Say("starting it (the first start takes a little longer)");
+        ProcessRunner.Run(manager, ["control", "-v", index, "launch"], 120_000);
+        MuMuInstance? instance = null;
+        for (var deadline = DateTime.UtcNow.AddMinutes(4); instance == null && DateTime.UtcNow < deadline;)
+        {
+            Thread.Sleep(3000);
+            instance = MuMuControl.Instance(manager, index);
+        }
+        if (instance == null || !MuMuControl.WaitForBoot(instance, TimeSpan.FromMinutes(4))) return "The new emulator did not finish starting.";
+        return Run(instance, name, sdkRoot, progress, rootAfter: "false");
+    }
+
+    /// <summary>"iPhone Duo", or "iPhone Duo 2" and so on when that name is taken.</summary>
+    internal static string NextName(IEnumerable<string> taken)
+    {
+        var names = new HashSet<string>(taken, StringComparer.OrdinalIgnoreCase);
+        if (!names.Contains("iPhone Duo")) return "iPhone Duo";
+        for (int n = 2; ; n++)
+            if (!names.Contains($"iPhone Duo {n}")) return $"iPhone Duo {n}";
+    }
+
     /// <summary>Runs every missing step. Null on success, otherwise what went wrong; progress goes to the callback and the log.</summary>
-    public static string? Run(MuMuInstance instance, string title, string? sdkRoot, Action<string> progress)
+    /// <param name="rootAfter">MuMu's root permission when done: null puts back what it was.</param>
+    public static string? Run(MuMuInstance instance, string title, string? sdkRoot, Action<string> progress, string? rootAfter = null)
     {
         void Say(string text)
         {
@@ -39,11 +99,15 @@ internal static class DuoSetup
         if (addStates)
         {
             string root = MuMuControl.GetSetting(instance, "root_permission") ?? "false";
-            if (root != "true") MuMuControl.SetSettings(instance, ("root_permission", "true"));
-            Say("restarting with root to add the foldable device states");
-            if (RestartAndWait(instance) is { } restartError) return restartError;
+            // Root already on (a new Duo starts that way): adb root works now, no restart needed for it.
+            if (root != "true" || resize || !TryAdbRoot(instance))
+            {
+                if (root != "true") MuMuControl.SetSettings(instance, ("root_permission", "true"));
+                Say("restarting with root to add the foldable device states");
+                if (RestartAndWait(instance) is { } restartError) return restartError;
+            }
             string? error = WriteDeviceStates(instance);
-            if (root != "true") MuMuControl.SetSettings(instance, ("root_permission", root));
+            MuMuControl.SetSettings(instance, ("root_permission", rootAfter ?? root));
             if (error != null) return error;
             Say("restarting so Android loads the device states");
             if (RestartAndWait(instance) is { } secondError) return secondError;
@@ -66,18 +130,23 @@ internal static class DuoSetup
         return null;
     }
 
-    /// <summary>As root: writes the state file with the owner, mode and SELinux label system_server expects.</summary>
-    private static string? WriteDeviceStates(MuMuInstance instance)
+    /// <summary>adbd as root (MuMu's root on Android 15); true once a shell answers as uid 0.</summary>
+    private static bool TryAdbRoot(MuMuInstance instance)
     {
         instance.Adb("root");
-        bool rooted = false;
-        for (int i = 0; i < 20 && !rooted; i++)
+        for (int i = 0; i < 20; i++)
         {
             Thread.Sleep(1000);
             MuMuControl.Reconnect(instance);
-            rooted = instance.Shell("id").Output.Contains("uid=0(");
+            if (instance.Shell("id").Output.Contains("uid=0(")) return true;
         }
-        if (!rooted) return "adb root did not take (MuMu root permission is off?).";
+        return false;
+    }
+
+    /// <summary>As root: writes the state file with the owner, mode and SELinux label system_server expects.</summary>
+    private static string? WriteDeviceStates(MuMuInstance instance)
+    {
+        if (!instance.Shell("id").Output.Contains("uid=0(") && !TryAdbRoot(instance)) return "adb root did not take (MuMu root permission is off?).";
 
         string local = Path.Combine(Path.GetTempPath(), $"device_state_configuration-{Guid.NewGuid():N}.xml");
         try

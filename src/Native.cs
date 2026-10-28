@@ -87,6 +87,7 @@ internal static class Native
     [DllImport("user32.dll")] public static extern bool UnregisterHotKey(IntPtr hwnd, int id);
     [DllImport("user32.dll")] public static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint flags);
     [DllImport("user32.dll")] public static extern bool TrackMouseEvent(ref TRACKMOUSEEVENT track);
+    [DllImport("kernel32.dll")] public static extern bool AttachConsole(int processId);
     [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr hwnd);
     /// <summary>Changes only the window-wide opacity of a layered window, keeping its bitmap (for fades).</summary>
     [DllImport("user32.dll", EntryPoint = "UpdateLayeredWindow")]
