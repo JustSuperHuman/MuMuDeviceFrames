@@ -73,8 +73,8 @@ Filename: "{app}\{#AppExe}"; Parameters: "--duo-create"; StatusMsg: "Creating th
 Filename: "{app}\{#AppExe}"; Description: "Launch {#AppName}"; WorkingDir: "{app}"; Flags: postinstall nowait; Check: ShouldLaunch
 Filename: "{app}\{#AppExe}"; WorkingDir: "{app}"; Flags: nowait; Check: RelaunchAfterUpdate
 
-[UninstallDelete]
-Type: filesandordirs; Name: "{app}"
+; Inno removes the files it installed and empty directories itself. Keep unrelated files: a ZIP user can update
+; in an existing folder, and uninstalling later must never recursively remove that entire folder.
 
 [Code]
 const
