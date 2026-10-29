@@ -54,7 +54,19 @@ internal sealed record DuoSafeAreas(int Rail, int UprightTop, int Home, bool Tur
     }
 
     /// <summary>The safe areas apps get in a pose, as Android reports the cutout (display orientation, pixels).</summary>
-    public (int Left, int Top, int Right, int Bottom) Insets(DuoPose pose) => IPhoneDuo.IsUpright(pose) ? (0, 0, 0, Home) : (0, 0, Rail, Home);
+    public (int Left, int Top, int Right, int Bottom) Insets(DuoPose pose) => IPhoneDuo.IsUpright(pose) ? (0, UprightTop, 0, Home) : (0, 0, Rail, Home);
+
+    /// <summary>The app window when Android reserves the system areas, including dialogs and the keyboard.</summary>
+    public Rectangle ContentBounds(DuoPose pose)
+    {
+        var screen = IPhoneDuo.ScreenSize(pose);
+        var (left, top, right, bottom) = Insets(pose);
+        return Rectangle.FromLTRB(left, top, screen.Width - right, screen.Height - bottom);
+    }
+
+    public bool Matches(DuoPose pose, DuoDevice device, bool protect) => device.Cutout == Insets(pose)
+        && device.StatusBarHeight == Insets(pose).Top
+        && (protect ? device.SafeAreaProtection == true && device.SafeContent == ContentBounds(pose) : device.SafeAreaProtection != true);
 
     /// <summary>Tent's waterfall: the rail on the right and the home indicator at the bottom, at tent's rotation.</summary>
     public (int Left, int Top, int Right, int Bottom) TentNatural =>
@@ -65,13 +77,11 @@ internal sealed record DuoSafeAreas(int Rail, int UprightTop, int Home, bool Tur
         IPhoneDuo.ToPanel((0, 0, Rail, Home), IPhoneDuo.RotationFor(DuoPose.Open, Turned));
 
     /// <summary>
-    /// The upright poses' waterfall on the panel's edges: the home indicator only. Their top comes from the status bar
-    /// height instead (<see cref="UprightTop"/>): SystemUI sizes the status bar at the rotation change, with whatever
-    /// cutout Android holds at that moment, which is still the rail poses' set until the safe areas are refreshed. At
-    /// rotation 90 the rail set lies on the panel's bottom and left edges, which never show at the top upright.
+    /// The upright poses' waterfall on the panel's edges: the top status element and the home indicator. Keeping both
+    /// in the cutout lets Android's display-area organizer reserve them even for edge-to-edge apps.
     /// </summary>
     public (int Left, int Top, int Right, int Bottom) UprightNatural =>
-        IPhoneDuo.ToPanel((0, 0, 0, Home), IPhoneDuo.RotationFor(DuoPose.OpenPortrait, Turned));
+        IPhoneDuo.ToPanel((0, UprightTop, 0, Home), IPhoneDuo.RotationFor(DuoPose.OpenPortrait, Turned));
 
     public override string ToString() => $"{Rail}|{UprightTop}|{Home}|{(Turned ? "turned" : "landscape")}";
 }

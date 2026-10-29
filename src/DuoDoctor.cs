@@ -15,8 +15,10 @@ internal static class DuoDoctor
     }
 
     /// <param name="intended">The pose the tray app keeps this emulator in (from the config), if it has one.</param>
-    public static List<Finding> Run(MuMuInstance instance, string title, DuoPose? intended, string? sdkRoot, bool repair)
+    public static List<Finding> Run(MuMuInstance instance, string title, DuoPose? intended, string? sdkRoot, bool repair, InstanceConfig? settings = null)
     {
+        using var operation = instance.ExclusiveOperation();
+        settings ??= new InstanceConfig();
         var findings = new List<Finding>();
         void Add(Outcome outcome, string text)
         {
@@ -55,6 +57,8 @@ internal static class DuoDoctor
             }
             Add(Outcome.Fixed, $"Set up {missing} (restarted the emulator).");
             display = MuMuControl.QueryDisplay(instance) ?? display;
+            foldable = display.Duo?.Foldable == true;
+            autoRotate = MuMuControl.GetSetting(instance, "window_auto_rotate") ?? "?";
         }
         else
         {
@@ -83,6 +87,14 @@ internal static class DuoDoctor
         else if (DuoSetup.InstallPostures(instance, sdkRoot) is { } overlayError) Add(Outcome.Failed, $"Postures overlay: {overlayError}");
         else Add(Outcome.Fixed, "Installed the postures overlay.");
 
+        // Gestures may restart Android's framework: do this before restoring the pose and its safe areas.
+        bool rooted = MuMuControl.GetSetting(instance, "root_permission") == "true";
+        if (DuoSetup.GesturesOn(instance)) Add(Outcome.Ok, "Navigation gestures on (swipe up for home, from an edge for back).");
+        else if (!rooted) Add(Outcome.Note, "Navigation gestures off: they need MuMu's root permission (on for new iPhone Duos).");
+        else if (!repair) Add(Outcome.Failed, "Navigation gestures are off.");
+        else if (DuoSetup.EnableGestures(instance) is { } gestureError) Add(Outcome.Failed, $"Could not turn the navigation gestures on: {gestureError}");
+        else Add(Outcome.Fixed, "Turned the navigation gestures back on.");
+
         // 3. The pose: display, rotation, device state and fold line all agreeing.
         display = MuMuControl.QueryDisplay(instance) ?? display;
         var shown = IPhoneDuo.Detect(display);
@@ -101,43 +113,52 @@ internal static class DuoDoctor
         else
         {
             instance.Shell(string.Join("; ", IPhoneDuo.Commands(pose, display.Native, foldable: true)));
-            var now = MuMuControl.QueryDisplay(instance);
+            var now = MuMuControl.WaitForPose(instance, pose);
             if (IPhoneDuo.Detect(now) == pose && IPhoneDuo.InStep(pose, now)) Add(Outcome.Fixed, $"Put the pose back to {IPhoneDuo.Variant(pose)} (was {shown?.ToString() ?? "none"}, state {display.Duo?.FoldState}).");
             else Add(Outcome.Failed, $"Could not put the pose back to {IPhoneDuo.Variant(pose)}.");
+            display = now ?? display;
         }
 
-        // 3b. The safe areas apps get (WindowManager's cutout) for the pose, when the safe-area overlay is in.
-        string overlays = instance.Shell("cmd overlay list android").Output;
-        if (overlays.Contains("[x] " + AndroidCutout.FrameworkOverlay, StringComparison.Ordinal) && IPhoneDuo.Detect(display) is { } posed
-            && DuoSafeAreas.For(display.Density, display.Native) is { } areas)
+        // A missing or outdated overlay is a failure too. Presence alone used to silently skip this whole check.
+        bool protect = settings.DuoProtectSafeAreas;
+        var areas = DuoSafeAreas.For(display.DensityOverride ?? display.Density, display.Native);
+        string signature = AndroidCutout.DuoSignature(areas, protect);
+        string overlays = instance.Shell("cmd overlay list").Output;
+        bool installed = overlays.Contains("[x] " + AndroidCutout.FrameworkOverlay, StringComparison.Ordinal)
+            && overlays.Contains("[x] " + AndroidCutout.SystemUiOverlay, StringComparison.Ordinal) && settings.DuoOverlay == signature;
+        if (!installed)
         {
-            var want = areas.Insets(posed);
-            (int, int, int, int)? Read() => MuMuControl.QueryDisplay(instance, cutout: true)?.Duo?.Cutout;
-            var got = Read();
-            if (got == want) Add(Outcome.Ok, $"Safe areas {want} for {IPhoneDuo.Variant(posed)}.");
-            else if (!repair) Add(Outcome.Failed, $"Safe areas apps get are {got?.ToString() ?? "unknown"}, not {want}.");
+            if (!repair) Add(Outcome.Failed, "Duo safe-area overlays are missing, disabled or out of date.");
+            else if (AndroidCutout.ApplyDuo(instance, sdkRoot, areas, protect) is { } error) Add(Outcome.Failed, $"Safe-area overlays: {error}");
             else
             {
-                if (display.Override is { } forced) instance.Shell(IPhoneDuo.ForceSizeAgain(forced));
-                Thread.Sleep(500);
-                if (Read() != want)
-                {
-                    instance.Shell(IPhoneDuo.RefreshSafeAreas);
-                    Thread.Sleep(1000);
-                }
-                var now = Read();
-                if (now == want) Add(Outcome.Fixed, $"Safe areas were {got?.ToString() ?? "unknown"}; now {want}.");
-                else Add(Outcome.Failed, $"Safe areas are still {now?.ToString() ?? "unknown"}, not {want}.");
+                settings.DuoOverlay = signature;
+                AndroidStatusBar.Hide(instance);
+                installed = true;
+                Add(Outcome.Fixed, "Installed the current Duo safe-area overlays.");
             }
         }
-
-        // 4. iOS's navigation gestures (MuMu switches them off at every boot; the tray app turns them back on).
-        bool rooted = MuMuControl.GetSetting(instance, "root_permission") == "true";
-        if (DuoSetup.GesturesOn(instance)) Add(Outcome.Ok, "Navigation gestures on (swipe up for home, from an edge for back).");
-        else if (!rooted) Add(Outcome.Note, "Navigation gestures off: they need MuMu's root permission (on for new iPhone Duos).");
-        else if (!repair) Add(Outcome.Failed, "Navigation gestures are off.");
-        else if (DuoSetup.EnableGestures(instance) is { } gestureError) Add(Outcome.Failed, $"Could not turn the navigation gestures on: {gestureError}");
-        else Add(Outcome.Fixed, "Turned the navigation gestures back on.");
+        if (installed && IPhoneDuo.Detect(display) == pose)
+        {
+            var got = MuMuControl.QueryDisplay(instance, cutout: true)?.Duo;
+            bool matches = got != null && areas.Matches(pose, got, protect);
+            if (!matches && repair)
+            {
+                string? error = protect ? DuoSetup.EnsureSafeAreaSupport(instance) : null;
+                if (error != null) Add(Outcome.Failed, error);
+                else
+                {
+                    instance.Shell(string.Join("; ", IPhoneDuo.SwitchCommands(pose, display.Native, foldable, refresh: true, protect)));
+                    Thread.Sleep(500);
+                    got = MuMuControl.QueryDisplay(instance, cutout: true)?.Duo;
+                }
+            }
+            if (got != null && areas.Matches(pose, got, protect))
+                Add(matches ? Outcome.Ok : Outcome.Fixed, $"Safe areas {areas.Insets(pose)} for {IPhoneDuo.Variant(pose)}" +
+                    (protect ? $"; all app windows inside {areas.ContentBounds(pose)}; status bar {got.StatusBarHeight}px." : "; app-managed insets (apps can draw behind the chrome)."));
+            else Add(Outcome.Failed, $"Safe areas {got?.Cutout.ToString() ?? "unknown"}, protected app bounds {got?.SafeContent.ToString() ?? "unknown"}, status bar {got?.StatusBarHeight}px; expected {areas.Insets(pose)}" +
+                (protect ? $" and {areas.ContentBounds(pose)}." : "."));
+        }
 
         // 5. Notes: the tray app.
         if (!TrayApp.IsRunning) Add(Outcome.Note, "The tray app is not running, so nothing heals the pose after an Android restart.");

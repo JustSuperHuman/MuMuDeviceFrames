@@ -8,7 +8,7 @@ namespace MuMuDeviceFrames;
 /// MuMu's Android 15 image root is <c>adb root</c> (there is no <c>su</c>), available after MuMu's root_permission
 /// setting and a restart. So the first time this takes two restarts: one with root to write the file, one with root
 /// back as it was so Android reads it. Every step is skipped when already done; run again, it just applies the closed
-/// pose. After that nothing needs root: the pose commands run as the shell user.
+/// pose. Pose commands run as the shell user; gesture navigation and protected app windows need root once per boot.
 /// </summary>
 internal static class DuoSetup
 {
@@ -23,7 +23,7 @@ internal static class DuoSetup
 
     /// <summary>
     /// A brand-new iPhone Duo emulator from nothing: a new MuMu instance (Android 15) at the Duo surface with root on
-    /// for its first start, then everything <see cref="Run"/> does, ending folded with root off. One restart in all.
+    /// for its first start, then everything <see cref="Run"/> does, ending folded with root on for boot recovery.
     /// </summary>
     /// <param name="named">Told the new emulator's name before it is created, so the tray app can leave it alone
     /// until the setup is done (it would otherwise fit it to whatever frame its picture looks like, with a restart).</param>
@@ -84,6 +84,7 @@ internal static class DuoSetup
     /// <param name="rootAfter">MuMu's root permission when done: null puts back what it was.</param>
     public static string? Run(MuMuInstance instance, string title, string? sdkRoot, Action<string> progress, string? rootAfter = null)
     {
+        using var operation = instance.ExclusiveOperation();
         void Say(string text)
         {
             Log.Write($"'{title}': Duo setup: {text}");
@@ -142,6 +143,34 @@ internal static class DuoSetup
         instance.Shell("getprop qemu.hw.mainkeys").Output.Trim() == "0" && instance.Shell("settings get secure navigation_mode").Output.Trim() == "2";
 
     /// <summary>
+    /// Android's built-in display-area organizer keeps every app, popup and IME out of the safe areas, including apps
+    /// that deliberately ignore cutout insets. MuMu leaves its support property unset. Set it once per boot as root,
+    /// then restart SystemUI alone so it creates the organizer. Apps and Android's framework keep running.
+    /// </summary>
+    public static string? EnsureSafeAreaSupport(MuMuInstance instance)
+    {
+        bool supported = instance.Shell("getprop ro.support_hide_display_cutout").Output.Trim() is "true" or "1";
+        bool ControllerPresent() => instance.Shell("dumpsys activity service com.android.systemui/.SystemUIService WMShell | sed -n '/HideDisplayCutoutController states:/p'")
+            .Output.Contains("HideDisplayCutoutController states:", StringComparison.Ordinal);
+        if (supported && ControllerPresent()) return null;
+        if (!instance.Shell("id").Output.Contains("uid=0(") && !TryAdbRoot(instance))
+            return "Keeping apps clear of the Duo's system areas needs MuMu's root permission. Enable it in MuMu, or turn off Keep apps clear of system areas to test app-managed insets.";
+        var set = supported ? (ExitCode: 0, Output: "") : instance.Shell("setprop ro.support_hide_display_cutout true");
+        if (instance.Shell("getprop ro.support_hide_display_cutout").Output.Trim() is not ("true" or "1"))
+            return $"This Android image could not enable display-area protection. {set.Output.Trim()}".TrimEnd();
+        string before = instance.Shell("pidof com.android.systemui").Output.Trim();
+        if (before.Length == 0) return "SystemUI is not running yet; display-area protection will be retried.";
+        instance.Shell("kill -TERM $(pidof com.android.systemui)");
+        for (int i = 0; i < 20; i++)
+        {
+            Thread.Sleep(500);
+            string pid = instance.Shell("pidof com.android.systemui").Output.Trim();
+            if (pid.Length > 0 && pid != before && ControllerPresent()) return null;
+        }
+        return "SystemUI did not come back after enabling display-area protection.";
+    }
+
+    /// <summary>
     /// iOS's navigation: swipe up from the bottom edge for home, in from a side edge for back. That is Android's gesture
     /// navigation, which MuMu switches off at every boot (qemu.hw.mainkeys=1, "no navigation bar"). As root: the property
     /// back to 0, gesture mode, and Android's framework restarted so it reads them (apps restart; the emulator does not).
@@ -171,7 +200,8 @@ internal static class DuoSetup
     {
         // adb root restarts adbd, which drops adb reverse rules (a dev server's Metro port): put them back.
         var reverses = MuMuControl.ParseReverses(instance.Adb("reverse", "--list").Output);
-        instance.Adb("root");
+        var root = instance.Adb("root");
+        if (root.ExitCode != 0 || root.Output.Contains("cannot run as root", StringComparison.OrdinalIgnoreCase)) return false;
         for (int i = 0; i < 20; i++)
         {
             Thread.Sleep(1000);

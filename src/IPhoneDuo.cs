@@ -19,7 +19,13 @@ internal enum DuoPose { Folded, Open, HalfOpen, OpenPortrait, Tabletop, Tent }
 /// <param name="Focus">The package of the window in front.</param>
 /// <param name="Uptime">Seconds since Android started; a smaller number than before means it restarted.</param>
 internal sealed record DuoDevice(Size? Current, bool Foldable, int? FoldState, bool Postures, int? Rotation = null, string? Features = null,
-    (int Left, int Top, int Right, int Bottom)? Cutout = null, string? Focus = null, double? Uptime = null);
+    (int Left, int Top, int Right, int Bottom)? Cutout = null, string? Focus = null, double? Uptime = null)
+{
+    /// <summary>Read with the cutout: whether Android's display-area protection is active, and its app bounds.</summary>
+    public bool? SafeAreaProtection { get; init; }
+    public Rectangle? SafeContent { get; init; }
+    public int? StatusBarHeight { get; init; }
+}
 
 /// <summary>
 /// iPhone Duo on a MuMu emulator. The emulator runs at the bounding box of both displays (2670 × 2034 at 480 dpi) and
@@ -187,6 +193,7 @@ internal static class IPhoneDuo
     /// </summary>
     public static bool InStep(DuoPose pose, AndroidDisplay? display) =>
         display?.Duo is { } duo && duo.Current == ScreenSize(pose) && (!duo.Foldable || duo.FoldState == StateFor(pose))
+        && (display.DensityOverride ?? display.Density) == Density
         // The pinned rotation itself (a landscape display at 270 looks the same as at 90, but its safe areas do not).
         && (duo.Rotation is not { } rotation || rotation == RotationFor(pose, display.Native.Width < display.Native.Height))
         // The fold line, on a foldable: there for the inner display, gone for the outer one.
@@ -273,12 +280,22 @@ internal static class IPhoneDuo
     /// state before shrinking and opening grows the display before setting the state.
     /// </summary>
     public static string[] Commands(DuoPose pose, Size physical, bool foldable = false)
+        => SwitchCommands(pose, physical, foldable, refresh: false, protect: false);
+
+    public static Size NaturalSize(DuoPose pose, Size physical)
+    {
+        var size = IsInner(pose) ? InnerScreen : OuterScreen;
+        return physical.Width < physical.Height ? new Size(size.Height, size.Width) : size;
+    }
+
+    /// <summary>One transition path for the tray, doctor and CLI. Drop the fold before intermediate geometry and
+    /// restore it only after the display and protected app windows have their final bounds.</summary>
+    public static string[] SwitchCommands(DuoPose pose, Size physical, bool foldable, bool refresh, bool protect)
     {
         bool turned = physical.Width < physical.Height;
         // wm size is the display in the panel's own orientation, the same for both ways round of the inner display;
         // the rotation turns it: on MuMu's turned panel 1 shows it landscape, 0 upright (see RotationFor).
-        var landscape = IsInner(pose) ? InnerScreen : OuterScreen; // tent is the outer display too, at the other rotation
-        var natural = turned ? new Size(landscape.Height, landscape.Width) : landscape;
+        var natural = NaturalSize(pose, physical);
         string[] display =
         [
             "wm fixed-to-user-rotation enabled",
@@ -286,10 +303,10 @@ internal static class IPhoneDuo
             $"wm size {natural.Width}x{natural.Height}",
             $"wm density {Density}",
         ];
-        if (!foldable) return display;
-        return IsInner(pose)
-            ? [.. display, $"settings put global display_features {FoldFeature(physical)}", $"cmd device_state state {StateFor(pose)}"]
-            : [$"cmd device_state state {StateFor(pose)}", "settings delete global display_features", .. display];
+        string[] safe = refresh ? [RefreshSafeAreas, ForceSizeAgain(natural), .. protect ? new[] { RefreshSafeBounds(natural) } : [], RefreshStatusBar(pose, physical)] : [];
+        if (!foldable) return [.. display, .. safe];
+        return ["cmd device_state state 0", "settings delete global display_features", .. display, .. safe,
+            .. IsInner(pose) ? new[] { $"settings put global display_features {FoldFeature(physical)}", $"cmd device_state state {StateFor(pose)}" } : []];
     }
 
     /// <summary>
@@ -341,6 +358,21 @@ internal static class IPhoneDuo
     public static string ForceSizeAgain(Size forced) => $"wm size {forced.Width}x{forced.Height}";
 
     /// <summary>
+    /// The display-area organizer caches insets by natural display size. A rotation alone (open to portrait, closed
+    /// to tent) does not invalidate them. A two-pixel size change and back after refreshing the cutout does, with the
+    /// same final geometry and no app relaunch. Only used for a pose-group change or a stale-bounds repair.
+    /// </summary>
+    public static string RefreshSafeBounds(Size forced) => $"wm size {forced.Width - 2}x{forced.Height}; sleep 0.2; {ForceSizeAgain(forced)}";
+
+    /// <summary>SystemUI sizes its status-bar window at rotation changes, before a pose's new cutout is read.
+    /// Turn 180 degrees and back after the refresh so it measures the final cutout. The dimensions stay unchanged.</summary>
+    public static string RefreshStatusBar(DuoPose pose, Size physical)
+    {
+        int rotation = RotationFor(pose, physical.Width < physical.Height);
+        return $"wm user-rotation lock {(rotation + 2) % 4}; sleep 0.2; wm user-rotation lock {rotation}";
+    }
+
+    /// <summary>
     /// One shell line for everything <see cref="DuoDevice"/> holds; <see cref="ParseDevice"/> reads its output.
     /// </summary>
     /// <remarks>
@@ -357,7 +389,8 @@ internal static class IPhoneDuo
         "echo postures:$(cmd overlay list android | grep -c 'x] " + PosturesOverlay + "'); " +
         "echo rotation:$(settings get system user_rotation); " +
         "echo features:$(settings get global display_features); " +
-        (cutout ? "echo cutout:$(dumpsys window displays 2>/dev/null | grep -m1 -o 'Cutout=DisplayCutout{insets=Rect([^)]*)'); " : "") +
+        (cutout ? "echo cutout:$(dumpsys window displays 2>/dev/null | sed -n '/mDisplayCutout=/p;/type=statusBars frame=/p'); " +
+            "echo safearea:$(dumpsys activity service com.android.systemui/.SystemUIService WMShell 2>/dev/null | sed -n '/HideDisplayCutoutController states:/,+18p'); " : "") +
         "echo focus:$(dumpsys input 2>/dev/null | grep -m1 -A1 'FocusedApplications:' | tail -1); " +
         "echo uptime:$(cut -d' ' -f1 /proc/uptime)";
 
@@ -374,6 +407,9 @@ internal static class IPhoneDuo
         var cutout = Regex.Match(output, @"insets=Rect\((-?\d+), (-?\d+) - (-?\d+), (-?\d+)\)");
         var focus = Regex.Match(output, @"^focus:.*?\bu\d+ ([^/\s}']+)/", RegexOptions.Multiline);
         var uptime = Regex.Match(output, @"^uptime:\s*([\d.]+)", RegexOptions.Multiline);
+        var protection = Regex.Match(output, @"^safearea:([^\r\n]*)", RegexOptions.Multiline);
+        var bounds = Regex.Match(protection.Value, @"mCurrentDisplayBounds=Rect\((-?\d+),\s*(-?\d+)\s*-\s*(-?\d+),\s*(-?\d+)\)");
+        var bar = Regex.Match(output, @"type=statusBars frame=\[-?\d+,(-?\d+)\]\[-?\d+,(-?\d+)\]");
         int Group(Match m, int i) => int.Parse(m.Groups[i].Value);
         return new DuoDevice(
             current.Success ? current.Groups[1].Success
@@ -386,7 +422,12 @@ internal static class IPhoneDuo
             features.Success && features.Groups[1].Value.Length > 0 ? features.Groups[1].Value : null,
             cutout.Success ? (Group(cutout, 1), Group(cutout, 2), Group(cutout, 3), Group(cutout, 4)) : null,
             focus.Success ? focus.Groups[1].Value : null,
-            uptime.Success && double.TryParse(uptime.Groups[1].Value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double up) ? up : null);
+            uptime.Success && double.TryParse(uptime.Groups[1].Value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double up) ? up : null)
+        {
+            SafeAreaProtection = protection.Success ? protection.Groups[1].Value.Contains("mEnabled=true", StringComparison.Ordinal) : null,
+            SafeContent = bounds.Success ? Rectangle.FromLTRB(Group(bounds, 1), Group(bounds, 2), Group(bounds, 3), Group(bounds, 4)) : null,
+            StatusBarHeight = bar.Success ? Math.Max(0, Group(bar, 2) - Group(bar, 1)) : null,
+        };
     }
 
     // ---- placement ----------------------------------------------------------------------------------------------

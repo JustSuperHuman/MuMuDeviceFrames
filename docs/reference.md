@@ -83,7 +83,7 @@ unins000.exe /VERYSILENT [/REMOVESETTINGS=1] [/REMOVEOVERLAYS=1]
 | Action | Result |
 | --- | --- |
 | Drag the bezel | Moves the emulator (its title bar is hidden, so the bezel is the handle) |
-| Right-click the bezel | Menu for that emulator: Copy, Save, Reload, Dev gear and Close apps tiles; on an iPhone Duo, the pose selector (click a pose to switch); a **Record entire frame** button when compatible ShareX is installed (it becomes **Stop recording** with the elapsed time while one runs); then frame, Android display, the iPhone Duo submenu (Check iPhone Duo, Animate folding, Show pose controls) and minimize |
+| Right-click the bezel | Menu for that emulator: Copy, Save, Reload, Dev gear and Close apps tiles; on an iPhone Duo, the pose selector (click a pose to switch); a **Record entire frame** button when compatible ShareX is installed (it becomes **Stop recording** with the elapsed time while one runs); then frame, Android display, the iPhone Duo submenu (Check iPhone Duo, Keep apps clear of system areas, Animate folding, Show pose controls) and minimize |
 | Double-click the bezel | Peek: brings MuMu's title bar and toolbar back without dropping the frame; again to hide |
 | `Ctrl+Alt+F` | All frames off / on (off = emulators look exactly like stock MuMu) |
 | `Ctrl+Alt+R` | Reload the Expo app in the active or last active emulator |
@@ -204,6 +204,11 @@ and the Android-matching switch are stored per emulator name. `log.txt` is next 
 | `StatusBarFont` | `null` | Font for that time (SF Pro if installed, else Segoe UI Semibold) |
 | `AndroidSdk` | `null` (`ANDROID_HOME`) | SDK folder for the overlays |
 | `ProcessNames` | `MuMuNxDevice, MuMuPlayer, NemuPlayer` | Emulator executables to attach to |
+
+Under `Instances`, each Duo emulator has `DuoProtectSafeAreas` (`true` by default). It reserves the rail or top status
+area and home-indicator area outside app windows. Set it to `false` to test an app's own edge-to-edge inset handling,
+or use **iPhone Duo ▸ Keep apps clear of system areas** in its bezel menu. This can relaunch open apps once when the
+overlay changes. [Duo setup and safe areas](iphone-duo.md) describes the root requirement and usable window sizes.
 
 Command line: `--exit` (quit the running instance cleanly) · `--expo-reload [emulator]` / `--expo-gear [emulator]` (Expo actions; omit the name to use the running tray app) · `--startup on|off` (start with Windows) · `--restore` (un-clip all emulator windows; only needed if
 the app was killed; starting it again does the same) · `--download [folder]` (fetch the frame set) ·

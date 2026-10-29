@@ -28,6 +28,10 @@ internal sealed class InstanceConfig
     /// <summary>The iPhone Duo's overlays installed on this emulator (<see cref="AndroidCutout.DuoSignature"/>).</summary>
     public string? DuoOverlay { get; set; }
 
+    /// <summary>Reserve the Duo's system areas outside app windows. Off exposes the full display and cutout insets
+    /// for testing an app's own edge-to-edge handling.</summary>
+    public bool DuoProtectSafeAreas { get; set; } = true;
+
     /// <summary>Per-emulator override of <see cref="AppConfig.IosStatusBar"/>. Null = follow the global setting.</summary>
     public bool? IosStatusBar { get; set; }
 

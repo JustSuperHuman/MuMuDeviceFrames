@@ -23,8 +23,9 @@ Apple's foldable has two displays: closed, the outer 1398 × 2034 display (466 �
 open, the inner 2670 × 1878 display (890 × 626 pt, landscape). MuMu cannot change resolution without a restart, so the
 emulator runs at the bounding box of both, **2670 × 2034 at 480 dpi**, and Android's `wm size` picks the display.
 Each display shares one side with that surface, so Android draws it at exactly 1:1 (no scaling), centred, with black
-bars where the other display would be: folded at x 636 of the surface, open at y 78. Apps see 466 × 678 dp folded and
-890 × 626 dp open, and the switch is live, like folding a real phone: the app in front is resized, not restarted
+bars where the other display would be: folded at x 636 of the surface, open at y 78. The full displays are 466 × 678 dp
+folded and 890 × 626 dp open. By default Android reserves the system areas described below outside app windows, so
+their usable space is smaller. The switch is live: the app in front is resized, not restarted
 (as long as it handles `screenSize|smallestScreenSize|screenLayout|orientation` changes, as Expo and React Native apps do).
 
 The emulator is also a real Android foldable. Android has the device states CLOSED, HALF_OPENED and OPENED, a framework
@@ -45,8 +46,8 @@ Fold:
 iPhone Duo…** (or `MuMuDeviceFrames.exe --duo-setup <emulator>`). It does whatever is missing, about 30 seconds the
 first time, and leaves the emulator closed:
 
-1. MuMu settings: 2670 × 2034 at 480 dpi, and MuMu's window auto-rotate off (MuMu turns its window, and Android with
-   it, to follow the app in front).
+1. MuMu settings: 2670 × 2034 at 480 dpi, and MuMu's window auto-rotate on so its window follows the pinned Android
+   rotation for each pose.
 2. The device states, in `/data/system/devicestate/device_state_configuration.xml` (owner system, mode 0644,
    SELinux `system_data_file`). Only root can write there, and on MuMu's Android 15 image root is `adb root` (there is
    no `su`): the setup turns on MuMu's root permission, restarts, writes the file over `adb root`, puts the root
@@ -54,7 +55,9 @@ first time, and leaves the emulator closed:
 3. The postures overlay `com.justsuperhuman.deviceframes.foldable` (`config_device_state_postures` = `0:1`, `1:2`,
    `2:3`), signed with the AOSP platform test key like the cutout overlays. Apps read it once per process.
 
-After that nothing needs root: every pose switch runs as the shell user.
+Pose switches run as the shell user. Gesture navigation and universal safe-area protection need root once per Android
+boot; new Duo emulators keep MuMu's root permission on for this. On an existing emulator with root off, enable root in
+MuMu and restart it, or turn off **Keep apps clear of system areas** to use app-managed insets.
 
 ![The iPhone Duo with its pose buttons beside it](pose-panel.png)
 
@@ -113,14 +116,27 @@ trailing rail in Closed (under the outer camera), Open and Book, and in Tent (ab
 there), and sits in the top-trailing corner in Open portrait and Tabletop. Its positions and sizes are measured on Apple's HIG renders and match them within 1 pt. The home
 indicator is drawn in every pose. Light or dark comes from the pixels behind each.
 
-Every app gets the Duo's safe areas as real Android insets: in Closed, Open, Book and Tent 84 pt on the right and 34
-pt at the bottom, in Open portrait and Tabletop 68 pt at the top and 34 pt at the bottom. They are display cutouts of
-the "waterfall" kind, in three sets (Closed, Open and Book; the open display upright; Tent), each in resources for that
-configuration. Android reads the cutout when the display turns on, for the configuration it is in, so a switch from one
-set to another turns the display off and on for half a second under the fold animation; those switches take about 1.5
-to 2 seconds, the others about one. No app is relaunched by a pose switch.
-Apps that are not edge to edge are kept clear of them (letterboxed). Installing them the first time relaunches open
-apps once.
+The safe areas are 84 pt on the right and 34 pt at the bottom in Closed, Open, Book and Tent, and 68 pt at the top and
+34 pt at the bottom in Open portrait and Tabletop. Android reports them as waterfall display cutouts, in three sets
+(Closed, Open and Book; the open display upright; Tent).
+
+**Keep apps clear of system areas** is on by default in the bezel menu's **iPhone Duo** submenu. Android's display-area
+organizer reserves these areas outside app windows, including dialogs and the keyboard. Apps that ignore cutout
+insets stay clear of the status element and home indicator too. The reserved bands are black. Usable app windows are
+382 × 644 dp closed, 806 × 592 dp open or book, 626 × 788 dp upright or tabletop, and 594 × 432 dp in tent.
+
+For testing an app's own edge-to-edge handling, turn this option off (or set `DuoProtectSafeAreas` to `false` under that
+emulator in `config.json`). The app gets the full display and the same cutout insets, and must apply them itself.
+Android 15 allows edge-to-edge apps to draw through cutouts, so controls can overlap the status element in this mode.
+See [Android's cutout guidance](https://developer.android.com/develop/ui/views/layout/display-cutout).
+
+Android reads each cutout set when the display turns on. Switching sets turns the display off and on for half a second
+under the animation, then refreshes the organizer's cached bounds. Pose changes resize the app without relaunching it.
+Installing or updating the overlays, or changing the protection option, can relaunch open apps once.
+
+**Check iPhone Duo…** verifies the reported insets, the status-bar height and the organizer's actual app bounds. It also installs missing or
+outdated overlays and restores the pose after gesture setup. Automatic repairs have a retry limit; a failed repair
+does not keep blinking the display. Use the check again after fixing a missing dependency or MuMu root permission.
 
 iOS's navigation gestures work too: swipe up from the bottom edge for home, in from a side edge for back. That is
 Android's gesture navigation, which MuMu turns off at every boot; the tray app turns it back on (a restart of Android's

@@ -773,7 +773,7 @@ internal sealed class MenuRenderer(MenuStyle.Palette palette) : ToolStripProfess
         // ToolStrip draws the shortcut column through here too, which is where hints live.
         if (item is ToolStripMenuItem menuItem && e.Text != menuItem.Text)
         {
-            DrawHint(g, item, e.Text);
+            if (!string.IsNullOrEmpty(e.Text)) DrawHint(g, item, e.Text);
             return;
         }
 

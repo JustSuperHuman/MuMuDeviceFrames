@@ -438,7 +438,8 @@ internal sealed class TrayApp : ApplicationContext
             : new MenuItem("Update device frames", DownloadGlyph, DownloadFrames) { Hint = $"{Library.DownloadedCount} installed", Enabled = !_downloading });
         items.Add(new MenuItem("Reload frames and config", RefreshGlyph, Reload));
         items.Add(new MenuItem(_toolsBusy ? "Android display tools setup in progress…" : "Install / repair Android display tools…",
-            DownloadGlyph, () => SetupAndroidTools()) { Enabled = !_toolsBusy });
+            DownloadGlyph, () => SetupAndroidTools())
+        { Enabled = !_toolsBusy });
         items.Add(new MenuItem("Open config folder", FolderGlyph, () =>
         {
             Config.Save();
@@ -479,7 +480,8 @@ internal sealed class TrayApp : ApplicationContext
                 bool half = IPhoneDuo.IsHalf(pose);
                 string tip = half && !session.IsFoldable ? "Needs Set up as iPhone Duo" : $"{IPhoneDuo.Describe(pose)}   {PoseHotkey(pose)}".TrimEnd();
                 return new PoseChoice(pose, IPhoneDuo.ShortName(pose), canFold && (!half || session.IsFoldable), tip);
-            }).ToList(), session.Pose, pose => session.SetDuoPose(pose, "the menu")) { Enabled = canFold });
+            }).ToList(), session.Pose, pose => session.SetDuoPose(pose, "the menu"))
+            { Enabled = canFold });
         }
 
         if (ShareXIntegration.FindCompatible(Config.ShareXExecutable) != null)
@@ -520,6 +522,12 @@ internal sealed class TrayApp : ApplicationContext
             // The Duo's less frequent settings, out of the way of the pose bar.
             var duoItems = new MenuItem("iPhone Duo", PhoneGlyph);
             duoItems.DropDownItems.Add(new MenuItem("Check iPhone Duo…", null, () => CheckDuo(session)) { Enabled = connected, Hint = "Repairs" });
+            duoItems.DropDownItems.Add(Check("Keep apps clear of system areas", instance.DuoProtectSafeAreas, () =>
+            {
+                instance.DuoProtectSafeAreas = !instance.DuoProtectSafeAreas;
+                Config.Save();
+                session.RetryCutout();
+            }, hint: instance.DuoProtectSafeAreas ? "All apps" : "App-managed insets"));
             duoItems.DropDownItems.Add(Check("Animate folding", Config.DuoAnimations, () =>
             {
                 Config.DuoAnimations = !Config.DuoAnimations;
@@ -618,12 +626,12 @@ internal sealed class TrayApp : ApplicationContext
     }
 
     /// <summary>
-    /// The iPhone Duo leaves the status bar to the app (it draws its own rail), so there is no cutout or iOS bar to
+    /// The iPhone Duo has its own chrome and pose-specific safe areas, so there is no ordinary iPhone status bar to
     /// match; what matters is the 2670 × 2034 surface both poses are cut from.
     /// </summary>
     private void AddDuoAndroidItems(ToolStripItemCollection items, EmulatorSession session, bool connected)
     {
-        items.Add(new MenuItem("Status bar and cutout") { Hint = "Drawn by the app on iPhone Duo", Enabled = false });
+        items.Add(new MenuItem("Status and safe areas") { Hint = "Managed by iPhone Duo", Enabled = false });
         if (session.Display is not { } display) return;
         items.Add(new MenuSeparator());
         var surface = IPhoneDuo.Surface;

@@ -26,5 +26,5 @@ internal static class AndroidStatusBar
 
     /// <summary>True when the foreground app asks for a light status bar, i.e. dark glyphs on a light background.</summary>
     public static bool WantsDarkGlyphs(MuMuInstance instance) =>
-        instance.Shell("dumpsys window | grep -A1 -m1 mLastStatusBarAppearanceRegions").Output.Contains("LIGHT_STATUS_BARS");
+        instance.Shell("dumpsys window displays | sed -n '/mLastStatusBarAppearanceRegions/,+1p'").Output.Contains("LIGHT_STATUS_BARS");
 }

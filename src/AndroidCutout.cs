@@ -177,7 +177,10 @@ internal static class AndroidCutout
     }
 
     /// <summary>What <see cref="ApplyDuo"/> installs, recorded so a restart of this app does not install it again.</summary>
-    public static string DuoSignature(DuoSafeAreas areas) => $"duo-v6|{areas}";
+    public static string DuoSignature(DuoSafeAreas areas, bool protect = true) => $"duo-v7|{areas}|{(protect ? "protected" : "edge-to-edge")}";
+
+    public static bool HasDuoHome(string? signature) => signature?.StartsWith("duo-v6|", StringComparison.Ordinal) == true
+        || signature?.StartsWith("duo-v7|", StringComparison.Ordinal) == true;
 
     /// <summary>
     /// The iPhone Duo's part. Android's status bar is emptied (no clock, no notification icons) and 0 px tall, so the
@@ -185,11 +188,22 @@ internal static class AndroidCutout
     /// them as real display-cutout insets, and they are per pose. Android picks the waterfall from resources for the
     /// display's configuration whenever the display turns on (<see cref="IPhoneDuo.RefreshSafeAreas"/>), so the rail
     /// poses (the default values) and the open display upright (values-w600dp-port, 626 dp wide; closed is 466 dp)
-    /// each get their own edges, without any app relaunched. Waterfalls are given on the panel's own edges, so each set
-    /// is turned back by its poses' display rotation (<see cref="DuoSafeAreas"/>). Apps that are not edge to edge are
-    /// kept clear of them, as iOS keeps apps built for older SDKs clear of the Duo's status area.
+    /// each get their own edges. Waterfalls are given on the panel's own edges, so each set is turned back by its pose's
+    /// display rotation (<see cref="DuoSafeAreas"/>). By default Android's display-area organizer reserves them outside
+    /// app windows: even edge-to-edge apps cannot cover the chrome. App-managed insets can be selected for development.
     /// </summary>
-    public static string? ApplyDuo(MuMuInstance instance, string? sdkRoot, DuoSafeAreas areas)
+    public static string? ApplyDuo(MuMuInstance instance, string? sdkRoot, DuoSafeAreas areas, bool protect = true)
+    {
+        if (protect && DuoSetup.EnsureSafeAreaSupport(instance) is { } supportError) return supportError;
+        var folders = DuoResources(areas, protect);
+        if (InstallOverlay(instance, FrameworkOverlay, "android", "Device frame cutout", folders, sdkRoot) is { } error) return error;
+        const string values = "    <integer name=\"max_notif_static_icons\">0</integer>\n" +
+                              "    <dimen name=\"overflow_dot_radius\">0px</dimen>\n" +
+                              "    <dimen name=\"status_bar_clock_size\">0px</dimen>\n";
+        return InstallOverlay(instance, SystemUiOverlay, "com.android.systemui", "Device frame status bar", values, sdkRoot);
+    }
+
+    internal static IReadOnlyList<(string? Qualifier, string Values)> DuoResources(DuoSafeAreas areas, bool protect)
     {
         static string Waterfall((int Left, int Top, int Right, int Bottom) natural) =>
             $"    <dimen name=\"waterfall_display_left_edge_size\">{natural.Left}px</dimen>\n" +
@@ -200,15 +214,12 @@ internal static class AndroidCutout
         // portrait one 600 dp wide; closed, open and book are the rest (h500dp).
         var folders = new List<(string?, string)>
         {
-            (null, "    <dimen name=\"status_bar_height_default\">0px</dimen>\n" + Waterfall(areas.TentNatural)),
+            (null, "    <dimen name=\"status_bar_height_default\">0px</dimen>\n" +
+                $"    <bool name=\"config_hideDisplayCutoutWithDisplayArea\">{(protect ? "true" : "false")}</bool>\n" + Waterfall(areas.TentNatural)),
             ("h500dp", Waterfall(areas.RailNatural)),
-            ("w600dp-port", $"    <dimen name=\"status_bar_height_default\">{areas.UprightTop}px</dimen>\n" + Waterfall(areas.UprightNatural)),
+            ("w600dp-port", Waterfall(areas.UprightNatural)),
         };
-        if (InstallOverlay(instance, FrameworkOverlay, "android", "Device frame cutout", folders, sdkRoot) is { } error) return error;
-        const string values = "    <integer name=\"max_notif_static_icons\">0</integer>\n" +
-                              "    <dimen name=\"overflow_dot_radius\">0px</dimen>\n" +
-                              "    <dimen name=\"status_bar_clock_size\">0px</dimen>\n";
-        return InstallOverlay(instance, SystemUiOverlay, "com.android.systemui", "Device frame status bar", values, sdkRoot);
+        return folders;
     }
 
     /// <summary>
@@ -257,7 +268,7 @@ internal static class AndroidCutout
                 ("aapt2 link", () => ProcessRunner.Run(aapt2, ["link", "-o", unsigned, "-I", androidJar, "--manifest", Path.Combine(dir, "AndroidManifest.xml"), "--min-sdk-version", "30", "--target-sdk-version", "35", compiled])),
                 ("zipalign", () => ProcessRunner.Run(zipalign, ["-f", "4", unsigned, aligned])),
                 ("apksigner", () => ProcessRunner.RunBatch(apksigner, ["sign", "--key", key, "--cert", cert, "--out", apk, aligned])),
-                ("adb install", () => instance.Adb("install", "-r", apk)),
+                ("adb install", () => instance.Adb("install", "--no-incremental", "-r", apk)),
                 ("overlay enable", () => instance.Shell($"cmd overlay enable --user 0 {package}")),
             };
             foreach (var (name, run) in steps)

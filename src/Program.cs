@@ -39,15 +39,13 @@ internal static class Program
         {
             if (IPhoneDuo.ParseCliName(args[1]) is not { } chosen) { Log.Write($"--duo-pose: unknown pose '{args[1]}'"); return 2; }
             string? who = args.Length == 3 ? args[2] : null;
-            if (TrayApp.IsRunning) return TrayApp.RequestDuoPoseOfRunningInstance(chosen, who) ? 0 : 1;
-            return who == null ? 1 : RunDuoCommand(who, chosen);
+            return RunDuoCommand(who, chosen);
         }
         if (args.Length is 1 or 2 && args[0] is "--duo-fold" or "--duo-unfold" or "--duo-half")
         {
             var pose = args[0] switch { "--duo-fold" => DuoPose.Folded, "--duo-half" => DuoPose.HalfOpen, _ => DuoPose.Open };
             string? name = args.Length == 2 ? args[1] : null;
-            if (TrayApp.IsRunning) return TrayApp.RequestDuoPoseOfRunningInstance(pose, name) ? 0 : 1;
-            return name == null ? 1 : RunDuoCommand(name, pose);
+            return RunDuoCommand(name, pose);
         }
         //   --duo-setup <name>                 make an emulator the iPhone Duo: surface, foldable device states (root once,
         //                                      up to two restarts), postures overlay; then folded
@@ -264,25 +262,49 @@ internal static class Program
         }
         if (instance == null) { Say($"No running emulator named {name}."); return 2; }
         Say($"Checking {name}{(repair ? " (and repairing)" : "")}…");
-        var findings = DuoDoctor.Run(instance, name!, config.Instance(name!).DuoPose, config.AndroidSdk, repair);
+        var findings = DuoDoctor.Run(instance, name!, config.Instance(name!).DuoPose, config.AndroidSdk, repair, config.Instance(name!));
+        if (repair) config.Save();
         foreach (var finding in findings) Say(finding.ToString());
         File.WriteAllLines(Path.Combine(AppConfig.Dir, "duo-doctor.txt"), findings.Select(f => f.ToString()));
         return findings.Any(f => f.Outcome == DuoDoctor.Outcome.Failed) ? 1 : 0;
     }
 
     /// <summary>Fold or unfold without the tray app: the same wm commands, straight over adb.</summary>
-    private static int RunDuoCommand(string name, DuoPose pose)
+    private static int RunDuoCommand(string? name, DuoPose pose)
     {
         try
         {
+            if (TrayApp.IsRunning) return TrayApp.RequestDuoPoseOfRunningInstance(pose, name) ? 0 : 1;
+            // The tray claims its mutex before loading frames and creating its message window. Do not race its
+            // startup with a direct adb transition or a config write just because that window is not ready yet.
+            if (Mutex.TryOpenExisting(@"Local\MuMuDeviceFrames", out var starting))
+            {
+                using (starting)
+                {
+                    var deadline = DateTime.UtcNow.AddSeconds(10);
+                    while (!TrayApp.IsRunning && DateTime.UtcNow < deadline) Thread.Sleep(100);
+                    return TrayApp.IsRunning && TrayApp.RequestDuoPoseOfRunningInstance(pose, name) ? 0 : 1;
+                }
+            }
+            if (name == null) return 1;
             var instance = MuMuControl.LocateByName(name);
+            using var operation = instance?.ExclusiveOperation();
             var display = instance == null ? null : MuMuControl.QueryDisplay(instance);
             if (instance == null || display == null) { Log.Write($"iPhone Duo {pose}: emulator '{name}' not found"); return 1; }
             if (!IPhoneDuo.IsSurface(display.Native)) { Log.Write($"iPhone Duo {pose}: '{name}' is {display.Native.Width}x{display.Native.Height}, not set up as an iPhone Duo"); return 1; }
-            instance.Shell(string.Join("; ", IPhoneDuo.Commands(pose, display.Native, display.Duo?.Foldable == true)));
-            var reached = IPhoneDuo.Detect(MuMuControl.QueryDisplay(instance));
+            var config = AppConfig.Load();
+            var settings = config.Instance(name);
+            bool refresh = settings.DuoOverlay != null;
+            if (refresh && settings.DuoProtectSafeAreas && DuoSetup.EnsureSafeAreaSupport(instance) is { } error)
+            { Log.Write(error); return 1; }
+            instance.Shell(string.Join("; ", IPhoneDuo.SwitchCommands(pose, display.Native, display.Duo?.Foldable == true, refresh, settings.DuoProtectSafeAreas)));
+            var now = MuMuControl.WaitForPose(instance, pose);
+            var reached = IPhoneDuo.Detect(now);
             Log.Write($"iPhone Duo {pose} on '{name}' (adb): now {reached?.ToString() ?? "no pose"}");
-            return reached == pose ? 0 : 1;
+            if (reached != pose || !IPhoneDuo.InStep(pose, now)) return 1;
+            settings.DuoPose = pose;
+            config.Save();
+            return 0;
         }
         catch (Exception ex)
         {

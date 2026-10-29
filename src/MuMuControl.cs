@@ -67,9 +67,12 @@ internal static class ProcessRunner
 /// <summary>How to reach one emulator from outside: its MuMu instance index and its adb endpoint.</summary>
 internal sealed record MuMuInstance(string Index, string ManagerPath, string AdbPath, string AdbSerial)
 {
+    public IDisposable ExclusiveOperation() => new AndroidOperation(AdbSerial);
+
     public (int ExitCode, string Output) Adb(params string[] arguments) => ProcessRunner.Run(AdbPath, ["-s", AdbSerial, .. arguments]);
 
-    public (int ExitCode, string Output) Shell(string command) => Adb("shell", command);
+    public (int ExitCode, string Output) Shell(string command, int timeoutMs = 90_000) =>
+        ProcessRunner.Run(AdbPath, ["-s", AdbSerial, "shell", command], timeoutMs);
 
     /// <summary>A PNG of the Android display at native resolution, straight from the guest; null if it failed.</summary>
     public byte[]? Screencap()
@@ -78,6 +81,26 @@ internal sealed record MuMuInstance(string Index, string ManagerPath, string Adb
         // PNG signature check: on failure adb prints text instead.
         return exit == 0 && bytes.Length > 8 && bytes[0] == 0x89 && bytes[1] == (byte)'P' ? bytes : null;
     }
+}
+
+/// <summary>A tray task, a CLI health check and setup must not change one emulator at the same time. Mutexes are
+/// recursive on the owning thread, so setup and doctor can also be called from an already serialized tray task.</summary>
+internal sealed class AndroidOperation : IDisposable
+{
+    private readonly Mutex _mutex;
+
+    public AndroidOperation(string serial)
+    {
+        _mutex = new Mutex(false, @"Local\MuMuDeviceFrames.Android." + serial.Replace(':', '_'));
+        try
+        {
+            if (!_mutex.WaitOne(TimeSpan.FromMinutes(5))) throw new TimeoutException("Another operation is still using this emulator. Try again when setup or its health check finishes.");
+        }
+        catch (AbandonedMutexException) { /* the previous process exited; this thread owns the mutex now */ }
+        catch { _mutex.Dispose(); throw; }
+    }
+
+    public void Dispose() { _mutex.ReleaseMutex(); _mutex.Dispose(); }
 }
 
 /// <param name="Override">The <c>wm size</c> override, when one is set (the iPhone Duo poses use it).</param>
@@ -267,16 +290,30 @@ internal static class MuMuControl
     /// <param name="cutout">Also read WindowManager's safe areas (<see cref="IPhoneDuo.DeviceQuery"/>).</param>
     public static AndroidDisplay? QueryDisplay(MuMuInstance instance, bool cutout = false)
     {
-        string wmSize = instance.Shell("wm size").Output;
+        string wmSize = instance.Shell("wm size; wm density", timeoutMs: 5000).Output;
         var size = Regex.Match(wmSize, @"Physical size:\s*(\d+)x(\d+)");
-        string wmDensity = instance.Shell("wm density").Output;
-        var density = Regex.Match(wmDensity, @"Physical density:\s*(\d+)");
-        var densityOverride = Regex.Match(wmDensity, @"Override density:\s*(\d+)");
+        var density = Regex.Match(wmSize, @"Physical density:\s*(\d+)");
+        var densityOverride = Regex.Match(wmSize, @"Override density:\s*(\d+)");
         if (!size.Success || !density.Success) return null;
         var physical = new Size(int.Parse(size.Groups[1].Value), int.Parse(size.Groups[2].Value));
-        var duo = IPhoneDuo.IsSurface(physical) ? IPhoneDuo.ParseDevice(instance.Shell(IPhoneDuo.DeviceQuery(cutout)).Output) : null;
+        var duo = IPhoneDuo.IsSurface(physical) ? IPhoneDuo.ParseDevice(instance.Shell(IPhoneDuo.DeviceQuery(cutout), timeoutMs: 5000).Output) : null;
         return new AndroidDisplay(physical, int.Parse(density.Groups[1].Value), IPhoneDuo.ParseSize(wmSize, "Override size"), duo,
             densityOverride.Success ? int.Parse(densityOverride.Groups[1].Value) : null);
+    }
+
+    /// <summary>State requests and resize notifications settle asynchronously. Verify the whole pose before calling
+    /// a switch complete; a single immediate read can still contain the previous device state.</summary>
+    public static AndroidDisplay? WaitForPose(MuMuInstance instance, DuoPose pose)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(3);
+        AndroidDisplay? display;
+        do
+        {
+            display = QueryDisplay(instance);
+            if (IPhoneDuo.Detect(display) == pose && IPhoneDuo.InStep(pose, display)) return display;
+            Thread.Sleep(100);
+        } while (DateTime.UtcNow < deadline);
+        return display;
     }
 
     /// <summary>Writes a custom resolution into the instance's MuMu settings. Takes effect on the next emulator start.</summary>

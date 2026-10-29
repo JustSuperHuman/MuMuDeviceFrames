@@ -124,11 +124,11 @@ internal static class IosChrome
 
     /// <summary>
     /// The home indicator goes with the bottom safe area that keeps apps clear of it (drawn without one it sits on top
-    /// of tab bars): on the iPhone Duo once its safe-area overlay (duo-v6) is in, on Face ID iPhones once theirs has the
+    /// of tab bars): on the iPhone Duo once its safe-area overlay is in, on Face ID iPhones once theirs has the
     /// home-indicator safe area.
     /// </summary>
     public static bool HomeIndicator(FrameInfo frame, string? duoOverlay, string? iphoneOverlay) => IPhoneDuo.IsDuo(frame)
-        ? duoOverlay?.StartsWith("duo-v6", StringComparison.Ordinal) == true
+        ? AndroidCutout.HasDuoHome(duoOverlay)
         : AndroidCutout.HasHomeIndicator(frame) && iphoneOverlay?.EndsWith(AndroidCutout.HomeMark, StringComparison.Ordinal) == true;
 
     /// <summary>Draws onto <paramref name="g"/>: <paramref name="origin"/> is the screen's top-left on the target,

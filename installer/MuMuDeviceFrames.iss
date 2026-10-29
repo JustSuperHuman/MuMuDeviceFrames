@@ -11,8 +11,11 @@
 
 #define AppName "MuMu Device Frames"
 #define AppExe "MuMuDeviceFrames.exe"
+#ifndef PublishDir
+  #define PublishDir AddBackslash(SourcePath) + "..\publish"
+#endif
 #ifndef AppVersion
-  #define AppVersion GetVersionNumbersString(AddBackslash(SourcePath) + "..\publish\" + AppExe)
+  #define AppVersion GetVersionNumbersString(AddBackslash(PublishDir) + AppExe)
 #endif
 
 [Setup]
@@ -44,7 +47,7 @@ SolidCompression=yes
 CloseApplications=no
 
 [Messages]
-WelcomeLabel2=This installs [name/ver]: real iPhone, Pixel and Galaxy frames around your MuMu Player emulators, the iPhone Duo with its five poses, and the Android side of the fit (resolution, density, safe areas).%n%nNo admin rights are needed.
+WelcomeLabel2=This installs [name/ver]: real iPhone, Pixel and Galaxy frames around your MuMu Player emulators, the iPhone Duo with its six poses, and the Android side of the fit (resolution, density, safe areas).%n%nNo admin rights are needed.
 
 [Tasks]
 Name: "startup"; Description: "Start with Windows"
@@ -53,7 +56,7 @@ Name: "androidtools"; Description: "Install the Android display tools (safe area
 Name: "duo"; Description: "Set up an iPhone Duo emulator (a new MuMu instance, a minute or two)"; Flags: unchecked; Check: MuMuInstalled
 
 [Files]
-Source: "..\publish\*"; DestDir: "{app}"; Excludes: "*.pdb"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#PublishDir}\*"; DestDir: "{app}"; Excludes: "*.pdb"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{userprograms}\{#AppName}"; Filename: "{app}\{#AppExe}"; WorkingDir: "{app}"; Comment: "Real device frames around MuMu Player windows"

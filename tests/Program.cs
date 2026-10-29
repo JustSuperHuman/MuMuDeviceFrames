@@ -2,6 +2,14 @@ using System.Reflection;
 
 // Dependency checks use temporary SDK folders, not an emulator or package installation.
 var assembly = Assembly.Load("MuMuDeviceFrames");
+if (args is ["--hold-operation", var serial, var ready, var release])
+{
+    using var operation = (IDisposable)Activator.CreateInstance(assembly.GetType("MuMuDeviceFrames.AndroidOperation")!, serial)!;
+    File.WriteAllText(ready, "locked");
+    var deadline = DateTime.UtcNow.AddSeconds(10);
+    while (!File.Exists(release) && DateTime.UtcNow < deadline) Thread.Sleep(20);
+    return;
+}
 object? Call(string type, string method, params object?[] args) => assembly.GetType($"MuMuDeviceFrames.{type}")!
     .GetMethod(method, BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)!.Invoke(null, args);
 void Check(bool condition, string name)
@@ -104,8 +112,8 @@ var railNatural = (System.Runtime.CompilerServices.ITuple)areas.GetType().GetPro
 var uprightNatural = (System.Runtime.CompilerServices.ITuple)areas.GetType().GetProperty("UprightNatural")!.GetValue(areas)!;
 Check((int)railNatural[3]! == 252 && (int)railNatural[0]! == 102 && (int)railNatural[1]! == 0 && (int)railNatural[2]! == 0,
     "Rail poses (rotation 90): right 84 pt from the panel's bottom edge, bottom 34 pt from its left edge, nothing on its top");
-Check((int)uprightNatural[3]! == 102 && (int)uprightNatural[0]! == 0 && (int)uprightNatural[1]! == 0 && (int)uprightNatural[2]! == 0,
-    "Upright poses (rotation 0): the home indicator on the panel's bottom edge; their top comes from the status bar");
+Check((int)uprightNatural[3]! == 102 && (int)uprightNatural[0]! == 0 && (int)uprightNatural[1]! == 204 && (int)uprightNatural[2]! == 0,
+    "Upright poses (rotation 0): the top status element and home indicator are both reserved cutouts");
 Check(((string[])Call("IPhoneDuo", "Commands", OpenPortrait, new System.Drawing.Size(2034, 2670), false)!).Contains("wm user-rotation lock 0"),
     "Upright poses keep rotation 0");
 Check(((string[])Call("IPhoneDuo", "Commands", Open, new System.Drawing.Size(2034, 2670), false)!).Contains("wm size 1878x2670"), "Unfold on MuMu's turned panel swaps the size");
@@ -157,6 +165,27 @@ try
         }
     }
     Check(creaseStrength[HalfOpen] > creaseStrength[Open] * 1.5, "Half open frame shows a deeper crease than open");
+
+    // A capture requested while Open can return after Android has folded or turned upright. It must be identical
+    // to a capture requested in the final pose, including the status element's placement and scale.
+    var chromeType = assembly.GetType("MuMuDeviceFrames.ChromeState")!;
+    var kindType = assembly.GetType("MuMuDeviceFrames.ChromeKind")!;
+    object Chrome(string kind, System.Drawing.Size screen) => Activator.CreateInstance(chromeType, Enum.Parse(kindType, kind), true, screen, 480, false, "9:41", false)!;
+    var openFrame = Call("DuoFrames", "Frame", frames, Open)!;
+    foreach (var (pose, size, kind) in new[] { (Folded, new System.Drawing.Size(1398, 2034), "DuoRailClosed"), (OpenPortrait, new System.Drawing.Size(1878, 2670), "DuoCorner") })
+    {
+        using var image = new System.Drawing.Bitmap(size.Width, size.Height);
+        using (var g = System.Drawing.Graphics.FromImage(image)) g.Clear(System.Drawing.Color.FromArgb(22, 24, 26));
+        using var png = new MemoryStream();
+        image.Save(png, System.Drawing.Imaging.ImageFormat.Png);
+        using var duringSwitch = (System.Drawing.Bitmap)Call("FramedScreenshot", "Compose", openFrame, png.ToArray(), null, null, Chrome("DuoRailOpen", new(2670, 1878)))!;
+        using var expected = (System.Drawing.Bitmap)Call("FramedScreenshot", "Compose", Call("DuoFrames", "Frame", frames, pose), png.ToArray(), null, null, Chrome(kind, size))!;
+        using var actualPng = new MemoryStream();
+        using var expectedPng = new MemoryStream();
+        duringSwitch.Save(actualPng, System.Drawing.Imaging.ImageFormat.Png);
+        expected.Save(expectedPng, System.Drawing.Imaging.ImageFormat.Png);
+        Check(actualPng.ToArray().SequenceEqual(expectedPng.ToArray()), $"Screenshot during Open -> {pose} uses the captured pose's frame and chrome");
+    }
 }
 finally
 {
@@ -311,8 +340,8 @@ var turnedPairs = new[] { (Open, OpenPortrait), (HalfOpen, Tabletop), (Folded, T
 Check(turnedPairs.All(p => Equals(Call("IPhoneDuo", "Turned", p.Item1), p.Item2) && Equals(Call("IPhoneDuo", "Turned", p.Item2), p.Item1)),
     "Turning the device a quarter: open and open portrait, book and tabletop, closed and tent");
 var insetsOf = areas.GetType().GetMethod("Insets")!;
-Check(Equals(insetsOf.Invoke(areas, [Open]), (0, 0, 252, 102)) && Equals(insetsOf.Invoke(areas, [Tent]), (0, 0, 252, 102)) && Equals(insetsOf.Invoke(areas, [OpenPortrait]), (0, 0, 0, 102)),
-    "Safe areas the watchdog expects: the rail and home indicator, upright only the home indicator (its top is the status bar)");
+Check(Equals(insetsOf.Invoke(areas, [Open]), (0, 0, 252, 102)) && Equals(insetsOf.Invoke(areas, [Tent]), (0, 0, 252, 102)) && Equals(insetsOf.Invoke(areas, [OpenPortrait]), (0, 204, 0, 102)),
+    "Safe areas the watchdog expects: the rail and home indicator, upright the top status element and home indicator");
 
 // Each pose's last picture stands in for the live one at the next switch into that pose. It must never come back for
 // another size (the window was resized: it would not fit the frame), and a newer picture must replace an older one.
@@ -363,3 +392,89 @@ Check(!routine.Contains("dumpsys window") && withCutout.Contains("dumpsys window
 var dmShown = Call("IPhoneDuo", "ParseDevice", "shown:real 2670 x 1878\nstates:0,1,2\nstate:2\npostures:1\nfocus:    displayId=0, name='ActivityRecord{120168585 u0 com.justgains.justgainsmobile.internal/.MainActivity t54}', dispatchingTimeout=25000ms\n")!;
 Check(Prop<System.Drawing.Size?>(dmShown, "Current") == new System.Drawing.Size(2670, 1878) && Prop<string?>(dmShown, "Focus") == "com.justgains.justgainsmobile.internal",
     "Watchdog query: the size shown from DisplayManager, the app in front from the input dispatcher");
+
+// Android 15 lets edge-to-edge apps draw through cutout insets. Protection is healthy only when the organizer's
+// actual app rectangle agrees too, not just when Android reports the desired waterfall.
+var protectedDevice = Call("IPhoneDuo", "ParseDevice", "shown:real 2670 x 1878\ncutout:Cutout=DisplayCutout{insets=Rect(0, 0 - 252, 102)\n" +
+    "safearea:HideDisplayCutoutController states: mEnabled=true HideDisplayCutoutOrganizer states: mCurrentDisplayBounds=Rect(0, 0 - 2418, 1776)\n" +
+    "InsetsSource id=1 type=statusBars frame=[0,0][0,0] visible=true\n")!;
+bool Matches(object device, bool protect) => (bool)areas.GetType().GetMethod("Matches")!.Invoke(areas, [Open, device, protect])!;
+Check(Prop<bool?>(protectedDevice, "SafeAreaProtection") == true && Prop<System.Drawing.Rectangle?>(protectedDevice, "SafeContent") == new System.Drawing.Rectangle(0, 0, 2418, 1776)
+    && Matches(protectedDevice, true), "Protected safe areas: actual organizer bounds and cutout must both match");
+var insetOnly = Call("IPhoneDuo", "ParseDevice", "cutout:Cutout=DisplayCutout{insets=Rect(0, 0 - 252, 102)\nsafearea:\nInsetsSource type=statusBars frame=[0,0][0,0]\n")!;
+Check(!Matches(insetOnly, true) && Matches(insetOnly, false), "Correct insets without a controller fail protection but pass app-managed mode");
+var staleBounds = Call("IPhoneDuo", "ParseDevice", "cutout:Cutout=DisplayCutout{insets=Rect(0, 0 - 252, 102)\nsafearea:mEnabled=true mCurrentDisplayBounds=Rect(0, 0 - 2670, 1878)\n")!;
+Check(!Matches(staleBounds, true), "An enabled controller with stale full-display bounds is not healthy");
+Check(!Matches(protectedDevice, false), "App-managed mode is not healthy while Android is still protecting app windows");
+var staleBar = Call("IPhoneDuo", "ParseDevice", "cutout:Cutout=DisplayCutout{insets=Rect(0, 0 - 252, 102)\n" +
+    "safearea:mEnabled=true mCurrentDisplayBounds=Rect(0, 0 - 2418, 1776)\nInsetsSource id=1 type=statusBars frame=[0,0][2670,252] visible=true\n")!;
+Check(Prop<int?>(protectedDevice, "StatusBarHeight") == 0 && Prop<int?>(staleBar, "StatusBarHeight") == 252 && !Matches(staleBar, true),
+    "Correct protected bounds with a stale 252px status bar fail validation (extra top space after Tent)");
+Check(Prop<bool?>(dmShown, "SafeAreaProtection") == null && Prop<System.Drawing.Rectangle?>(dmShown, "SafeContent") == null,
+    "Routine pose polls do not invent a protection failure when safe areas were not queried");
+Check(((string)Call("AndroidCutout", "DuoSignature", areas, true)!).EndsWith("|protected")
+    && ((string)Call("AndroidCutout", "DuoSignature", areas, false)!).EndsWith("|edge-to-edge"), "Protection mode changes invalidate the installed overlay signature");
+Check((bool)Call("AndroidCutout", "HasDuoHome", "duo-v6|252|204|102|turned")!
+    && (bool)Call("AndroidCutout", "HasDuoHome", Call("AndroidCutout", "DuoSignature", areas, true))!
+    && !(bool)Call("AndroidCutout", "HasDuoHome", "duo-v60|other")!, "Home indicator survives the overlay upgrade without accepting unknown versions");
+Check(Prop<bool>(Activator.CreateInstance(assembly.GetType("MuMuDeviceFrames.InstanceConfig")!)!, "DuoProtectSafeAreas"), "Existing and new emulator configs default to protected system areas");
+var safeBounds = areas.GetType().GetMethod("ContentBounds")!;
+foreach (var (pose, expected) in new[]
+{
+    (Folded, new System.Drawing.Rectangle(0, 0, 1146, 1932)), (Open, new System.Drawing.Rectangle(0, 0, 2418, 1776)),
+    (HalfOpen, new System.Drawing.Rectangle(0, 0, 2418, 1776)), (Tent, new System.Drawing.Rectangle(0, 0, 1782, 1296)),
+    (OpenPortrait, new System.Drawing.Rectangle(0, 204, 1878, 2364)), (Tabletop, new System.Drawing.Rectangle(0, 204, 1878, 2364)),
+}) Check(Equals(safeBounds.Invoke(areas, [pose]), expected), $"Protected app window: {pose} = {expected}");
+foreach (var panel in new[] { mumuPanel, new System.Drawing.Size(2670, 2034) })
+{
+    var geometry = Call("DuoSafeAreas", "For", 480, panel)!;
+    foreach (var pose in new[] { Folded, Open, HalfOpen, OpenPortrait, Tabletop, Tent })
+    {
+        var expected = (System.Runtime.CompilerServices.ITuple)insetsOf.Invoke(geometry, [pose])!;
+        string edgeSet = pose.Equals(Tent) ? "TentNatural" : (bool)Call("IPhoneDuo", "IsUpright", pose)! ? "UprightNatural" : "RailNatural";
+        var edges = (System.Runtime.CompilerServices.ITuple)geometry.GetType().GetProperty(edgeSet)!.GetValue(geometry)!;
+        int rotation = (int)Call("IPhoneDuo", "RotationFor", pose, panel.Width < panel.Height)!;
+        Check(Enumerable.Range(0, 4).All(side => Equals(expected[side], edges[(int)Call("IPhoneDuo", "PanelEdge", side, rotation)!])),
+            $"Safe-area rotation: {pose} on {panel}");
+        var transition = (string[])Call("IPhoneDuo", "SwitchCommands", pose, panel, true, true, true)!;
+        Check(transition[0] == "cmd device_state state 0" && Array.IndexOf(transition, "settings delete global display_features") < Array.FindIndex(transition, s => s.StartsWith("wm size "))
+            && (!(bool)Call("IPhoneDuo", "IsInner", pose)! || transition[^1] == $"cmd device_state state {Call("IPhoneDuo", "StateFor", pose)}")
+            && transition.Any(s => s.Contains("sleep 0.2")), $"Pose transition clears the fold before geometry and refreshes protected bounds: {pose} on {panel}");
+        string barRefresh = (string)Call("IPhoneDuo", "RefreshStatusBar", pose, panel)!;
+        Check(Array.IndexOf(transition, barRefresh) > Array.IndexOf(transition, (string)assembly.GetType("MuMuDeviceFrames.IPhoneDuo")!.GetField("RefreshSafeAreas")!.GetValue(null)!)
+            && barRefresh.EndsWith($"wm user-rotation lock {rotation}"), $"Status bar is measured after the new cutout and finishes at the intended rotation: {pose} on {panel}");
+    }
+}
+object driftedDensity = Activator.CreateInstance(assembly.GetType("MuMuDeviceFrames.AndroidDisplay")!, mumuPanel, 480, inner,
+    Activator.CreateInstance(duoDevice, (System.Drawing.Size?)new System.Drawing.Size(2670, 1878), true, (int?)2, true, (int?)1, foldLine, null, null, null), (int?)320)!;
+Check(!(bool)CallTyped("IPhoneDuo", "InStep", inStepTypes, Open, driftedDensity)!, "The watchdog repairs density drift even when the pose geometry is unchanged");
+
+// The tray queue cannot serialize an independent CLI doctor. Exercise the actual named mutex across processes.
+string lockFixture = Path.Combine(Path.GetTempPath(), "deviceframes-lock-" + Guid.NewGuid().ToString("N"));
+Directory.CreateDirectory(lockFixture);
+string testSerial = "test-" + Guid.NewGuid().ToString("N"), readyFile = Path.Combine(lockFixture, "ready"), releaseFile = Path.Combine(lockFixture, "release");
+IDisposable Operation() => (IDisposable)Activator.CreateInstance(assembly.GetType("MuMuDeviceFrames.AndroidOperation")!, testSerial)!;
+using (Operation()) using (Operation()) Check(true, "An emulator operation can call setup or doctor recursively on the same thread");
+var childInfo = new System.Diagnostics.ProcessStartInfo(Environment.ProcessPath!) { UseShellExecute = false, CreateNoWindow = true };
+if (Path.GetFileNameWithoutExtension(Environment.ProcessPath!).Equals("dotnet", StringComparison.OrdinalIgnoreCase)) childInfo.ArgumentList.Add(Assembly.GetExecutingAssembly().Location);
+foreach (string arg in new[] { "--hold-operation", testSerial, readyFile, releaseFile }) childInfo.ArgumentList.Add(arg);
+using (var child = System.Diagnostics.Process.Start(childInfo)!)
+{
+    try
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        while (!File.Exists(readyFile) && DateTime.UtcNow < deadline && !child.HasExited) Thread.Sleep(20);
+        Check(File.Exists(readyFile), "Independent CLI process acquired the emulator operation lock");
+        var contender = Task.Run(() => { using (Operation()) return true; });
+        Thread.Sleep(150);
+        bool blocked = !contender.IsCompleted;
+        File.WriteAllText(releaseFile, "release");
+        Check(blocked && contender.Wait(5000) && contender.Result, "A second process waits for the emulator operation and continues when it is released");
+    }
+    finally
+    {
+        File.WriteAllText(releaseFile, "release");
+        if (!child.WaitForExit(5000)) child.Kill(entireProcessTree: true);
+        Directory.Delete(lockFixture, recursive: true);
+    }
+}

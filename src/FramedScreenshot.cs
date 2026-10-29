@@ -58,6 +58,13 @@ internal static class FramedScreenshot
     public static Bitmap Compose(FrameInfo frame, byte[] screenshotPng, string? background, StatusBar? statusBar = null, ChromeState? chrome = null)
     {
         using var shot = new Bitmap(new MemoryStream(screenshotPng));
+        // The capture may finish after a pose switch. Resolve both frame and chrome from the same captured display;
+        // otherwise the new frame gets the old pose's ring, home indicator scale and brightness samples.
+        if (IPhoneDuo.IsDuo(frame) && IPhoneDuo.ForShot(IPhoneDuo.PoseOf(frame), shot.Size) is { } pose)
+        {
+            if (pose != IPhoneDuo.PoseOf(frame)) frame = DuoFrames.Frame(AppConfig.BuiltInFramesRoot, pose);
+            if (chrome != null) chrome = chrome with { Kind = IosChrome.KindFor(frame, pose), Screen = shot.Size };
+        }
         // Light or dark chrome from the very pixels behind it, as on iOS (the screenshot is Android's exact picture).
         if (chrome != null && shot.Size == chrome.Screen)
         {
@@ -65,11 +72,6 @@ internal static class FramedScreenshot
             if (IosChrome.GlyphArea(chrome) is { } glyphs) chrome = chrome with { DarkGlyphs = IosChrome.IsLight(argb, glyphs) };
             if (chrome.Home) chrome = chrome with { DarkHome = IosChrome.IsLight(argb, IosChrome.HomeArea(chrome)) };
         }
-        // iPhone Duo: the screenshot's size says which display was on and which way round, so it always lands in the
-        // frame for that; whether the halves were flat or at an angle comes from the frame the caller chose.
-        if (IPhoneDuo.IsDuo(frame) && IPhoneDuo.ForShot(IPhoneDuo.PoseOf(frame), shot.Size) is { } pose && pose != IPhoneDuo.PoseOf(frame))
-            frame = DuoFrames.Frame(AppConfig.BuiltInFramesRoot, pose);
-
         var source = FrameSource.Load(frame);
         var screen = source.Screen;
         int width = source.Width, height = source.Height;

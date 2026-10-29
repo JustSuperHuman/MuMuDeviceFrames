@@ -17,6 +17,9 @@ internal sealed class EmulatorSession : IDisposable
     private (ChromeState State, Size Picture)? _chromeShown;
     private System.Windows.Forms.Timer? _chromeTimer;
     private bool _chromeDark, _homeDark, _chromePolling, _duoBarHidden, _gesturesChecked;
+    private readonly Backoff _duoChromeRetry = new(TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(20), TimeSpan.FromSeconds(60));
+    private string? _duoChromeTarget;
+    private bool _duoChromeNotice;
     private OverlayWindow? _fade;  // the previous frame, fading out over a pose switch
     private System.Windows.Forms.Timer? _fadeTimer;
     private DateTime _fadeStart;
@@ -39,6 +42,7 @@ internal sealed class EmulatorSession : IDisposable
     private int _verifyTicks;
     private bool _disposed;
     private bool _androidBusy;
+    private readonly Queue<Func<Action>> _androidTasks = new();
     private DateTime _nextDisplayQuery;
     private string? _failedCutout;
     private DuoPose? _wantedPose;
@@ -268,7 +272,7 @@ internal sealed class EmulatorSession : IDisposable
     /// <summary>
     /// The iOS chrome the tool owns, besides the status bar: the home indicator on iPhone frames (with the iOS chrome
     /// on and the model having one), the rail or status bar on the iPhone Duo. On the Duo, Android's own status bar is
-    /// emptied too; insets stay as they are (the app reserves the rail).
+    /// emptied too; Android reserves the rail outside app windows by default.
     /// </summary>
     private ChromeState? CurrentChrome()
     {
@@ -287,58 +291,83 @@ internal sealed class EmulatorSession : IDisposable
     {
         var state = CurrentChrome();
         bool duo = IPhoneDuo.IsDuo(Frame) && state != null;
-        if (duo != _duoBarHidden && Instance is { } instance && Display is { } display && !_androidBusy && !DuoSetupRunning.Contains(instance.AdbSerial))
+        if (Instance is { } instance && Display is { } display && !_androidBusy && !DuoSetupRunning.Contains(instance.AdbSerial))
         {
             // The Duo's iOS chrome replaces Android's status bar content in every pose; turned off, Android gets its
             // own status bar back exactly as it was.
-            _duoBarHidden = duo;
             var sdk = _app.Config.AndroidSdk;
             var config = _app.Config.Instance(Title);
             var areas = DuoSafeAreas.For(display.DensityOverride ?? display.Density, display.Native);
-            string signature = AndroidCutout.DuoSignature(areas);
+            bool protect = config.DuoProtectSafeAreas;
+            string signature = AndroidCutout.DuoSignature(areas, protect);
             bool install = duo && config.DuoOverlay != signature, remove = !duo && config.DuoOverlay != null;
-            string title = Title, serial = instance.AdbSerial;
-            if (install || remove) DuoSetupRunning.Add(serial);
-            RunAndroidTask(() =>
+            string target = duo ? signature : "off";
+            if (_duoChromeTarget != target)
             {
-                string? error = null;
-                try
+                _duoChromeTarget = target;
+                _duoChromeRetry.Reset();
+                _duoChromeNotice = false;
+            }
+            if ((duo != _duoBarHidden || install || remove) && _duoChromeRetry.TryNow(DateTime.UtcNow))
+            {
+                string title = Title, serial = instance.AdbSerial;
+                DuoSetupRunning.Add(serial);
+                RunAndroidTask(() =>
                 {
-                    if (duo)
+                    string? error = null;
+                    try
                     {
-                        AndroidStatusBar.Hide(instance);
-                        if (install) error = AndroidCutout.ApplyDuo(instance, sdk, areas);
-                    }
-                    else
-                    {
-                        AndroidStatusBar.Restore(instance);
-                        if (remove) AndroidCutout.Remove(instance);
-                    }
-                    // Android takes the new safe areas as the overlay changes (open apps are relaunched once, as for any
-                    // framework overlay); a display off and on gives the pose it is in its own set.
-                    if ((install && error == null) || remove)
-                    {
-                        instance.Shell(IPhoneDuo.RefreshSafeAreas);
-                        _app.Post(() =>
+                        if (duo)
                         {
-                            config.DuoOverlay = install ? signature : null;
-                            _app.Config.Save();
-                        });
-                        Log.Write($"'{title}': iPhone Duo safe areas {(install ? $"installed ({signature})" : "removed")}");
+                            AndroidStatusBar.Hide(instance);
+                            if (install) error = AndroidCutout.ApplyDuo(instance, sdk, areas, protect);
+                        }
+                        else
+                        {
+                            AndroidStatusBar.Restore(instance);
+                            if (remove) AndroidCutout.Remove(instance);
+                        }
+                        // Android takes the new safe areas as the overlay changes (open apps are relaunched once, as for any
+                        // framework overlay); a display off and on gives the pose it is in its own set.
+                        if ((install && error == null) || remove)
+                        {
+                            instance.Shell(IPhoneDuo.RefreshSafeAreas);
+                            if (install && protect && display.Override is { } forced) instance.Shell(IPhoneDuo.RefreshSafeBounds(forced));
+                            if (install && Pose is { } pose) instance.Shell(IPhoneDuo.RefreshStatusBar(pose, display.Native));
+                            Log.Write($"'{title}': iPhone Duo safe areas {(install ? $"installed ({signature})" : "removed")}");
+                        }
                     }
-                }
-                finally
-                {
-                    _app.Post(() => DuoSetupRunning.Remove(serial));
-                }
-                bool dark = AndroidStatusBar.WantsDarkGlyphs(instance);
-                return () =>
-                {
-                    _chromeDark = dark;
-                    Log.Write(error == null ? $"'{Title}': Android status bar {(duo ? "emptied for the iPhone Duo's chrome" : "back")}" : $"'{Title}': Duo status bar overlay: {error}");
-                    Sync();
-                };
-            });
+                    catch (Exception ex) { error = ex.Message; }
+                    finally
+                    {
+                        _app.Post(() => DuoSetupRunning.Remove(serial));
+                    }
+                    bool dark = AndroidStatusBar.WantsDarkGlyphs(instance);
+                    return () =>
+                    {
+                        _chromeDark = dark;
+                        if (error == null)
+                        {
+                            _duoBarHidden = duo;
+                            if (install || remove)
+                            {
+                                config.DuoOverlay = install ? signature : null;
+                                config.InstalledCutout = null; // both modes share overlay package names
+                                _app.Config.Save();
+                            }
+                            _duoChromeRetry.Reset();
+                            _nextCutoutCheck = DateTime.UtcNow.AddSeconds(1);
+                        }
+                        Log.Write(error == null ? $"'{Title}': Android status bar {(duo ? "emptied for the iPhone Duo's chrome" : "back")}" : $"'{Title}': Duo status bar overlay: {error}");
+                        if (error != null && !_duoChromeNotice)
+                        {
+                            _duoChromeNotice = true;
+                            _app.Notify($"{Title}: Duo safe areas could not be applied. {error}", warning: true);
+                        }
+                        Sync();
+                    };
+                });
+            }
         }
         // iOS's navigation gestures on the Duo: MuMu switches them off at every boot, so look once per attach and turn
         // them back on (a framework restart, no emulator restart) where MuMu's root permission allows it.
@@ -346,16 +375,19 @@ internal sealed class EmulatorSession : IDisposable
         {
             _gesturesChecked = true;
             string title = Title;
+            bool protect = _app.Config.Instance(title).DuoProtectSafeAreas;
             RunAndroidTask(() =>
             {
                 string? error = null;
                 bool rooted = MuMuControl.GetSetting(gestureInstance, "root_permission") == "true";
                 bool off = !DuoSetup.GesturesOn(gestureInstance);
                 if (off && rooted) error = DuoSetup.EnableGestures(gestureInstance);
+                string? safeError = protect ? DuoSetup.EnsureSafeAreaSupport(gestureInstance) : null;
                 return () =>
                 {
                     if (off) Log.Write(!rooted ? $"'{title}': navigation gestures off (MuMu root permission is off)"
                         : error == null ? $"'{title}': navigation gestures back on" : $"'{title}': navigation gestures: {error}");
+                    if (safeError != null) _app.Notify($"{title}: {safeError}", warning: true);
                     _nextPosePoll = DateTime.MinValue; // a framework restart drops the device state: put the pose back
                 };
             });
@@ -1297,7 +1329,7 @@ internal sealed class EmulatorSession : IDisposable
 
     private void StartWantedPose()
     {
-        if (_wantedPose is not { } pose || Instance == null || Display == null || _animation != null) return;
+        if (_wantedPose is not { } pose || Instance == null || Display == null || _animation != null || _androidBusy) return;
         _wantedPose = null;
         if (!IsDuoSurface)
         {
@@ -1342,26 +1374,23 @@ internal sealed class EmulatorSession : IDisposable
         // where Android rotated without reading its safe areas again.
         bool refresh = _app.Config.Instance(Title).DuoOverlay != null
             && (refreshSafeAreas || Pose is not { } before || IPhoneDuo.SafeAreaGroup(before) != IPhoneDuo.SafeAreaGroup(pose));
-        // Tent's rail lies on the panel edge that rotation 90 shows on top, and SystemUI sizes the status bar at the
-        // rotation change, before the refresh: turning 270 and back after it makes SystemUI size it again.
-        bool resizeStatusBar = refresh && Pose == DuoPose.Tent && IPhoneDuo.RotationFor(pose, display.Native.Width < display.Native.Height) == 1;
+        bool protect = _app.Config.Instance(Title).DuoProtectSafeAreas;
         bool animating = Pose is { } from && from != pose && BeginAnimation(from, pose);
         _fadeNext = !animating;
         RunAndroidTask(() =>
         {
             var rendered = key is { } k ? FrameRenderer.Render(frame!, k) : null;
-            var commands = IPhoneDuo.Commands(pose, display.Native, display.Duo?.Foldable == true);
-            if (refresh) commands = [.. commands, IPhoneDuo.RefreshSafeAreas];
-            if (resizeStatusBar) commands = [.. commands, "wm user-rotation lock 3", "sleep 0.3", "wm user-rotation lock 1"];
+            var commands = IPhoneDuo.SwitchCommands(pose, display.Native, display.Duo?.Foldable == true, refresh, protect);
             var (_, output) = instance.Shell(string.Join("; ", commands));
-            var now = MuMuControl.QueryDisplay(instance);
+            var now = MuMuControl.WaitForPose(instance, pose);
             return () =>
             {
                 if (now != null) Display = now;
                 var reached = IPhoneDuo.Detect(Display);
-                Log.Write($"'{Title}': iPhone Duo -> {pose}: {(reached == pose ? "done" : $"still {reached?.ToString() ?? "no pose"} ({output.Trim()})")}");
-                if (reached != pose)
-                    _app.Notify($"{Title}: could not {(pose == DuoPose.Folded ? "fold" : "unfold")} the iPhone Duo. {output.Trim()}".TrimEnd(), warning: true);
+                bool complete = reached == pose && IPhoneDuo.InStep(pose, Display);
+                Log.Write($"'{Title}': iPhone Duo -> {pose}: {(complete ? "done" : $"still {reached?.ToString() ?? "no pose"} ({output.Trim()})")}");
+                if (!complete)
+                    _app.Notify($"{Title}: could not switch the Duo to {IPhoneDuo.Variant(pose)}. {output.Trim()}".TrimEnd(), warning: true);
                 SetPose(reached);
                 if (reached is { } got && IPhoneDuo.InStep(got, Display)) _resyncAttempts = 0;
                 // What the watchdog compares with next: Android in this pose; MuMu's window unknown until it is seen
@@ -1486,7 +1515,7 @@ internal sealed class EmulatorSession : IDisposable
             if (kept is { } want) Reassert(want, $"Android shows no pose ({duo.Current?.Width}x{duo.Current?.Height})");
             return;
         }
-        if (Pose != shown && !_androidBusy) SetPose(shown); // the frame follows what Android shows
+        if (Pose != shown) SetPose(shown); // the frame follows what Android shows
 
         if (IPhoneDuo.TurnsWindow(shown) != upright)
         {
@@ -1542,8 +1571,9 @@ internal sealed class EmulatorSession : IDisposable
             _safeAreaRefresh.Reset();
             _safeAreaNoticeShown = false;
         }
-        if (config.DuoOverlay == null || duo.Cutout is not { } cutout || DuoSafeAreas.For(display.Density, display.Native) is not { } areas) return;
-        if (cutout == areas.Insets(target))
+        if (config.DuoOverlay == null || duo.Cutout is not { } cutout || DuoSafeAreas.For(display.DensityOverride ?? display.Density, display.Native) is not { } areas) return;
+        bool protect = config.DuoProtectSafeAreas;
+        if (areas.Matches(target, duo, protect))
         {
             _safeAreaRefresh.Reset();
             _safeAreaNoticeShown = false;
@@ -1555,12 +1585,21 @@ internal sealed class EmulatorSession : IDisposable
             // First the forced size again (WindowManager lost them, typically after Android's framework restarted; no
             // blink), then that and the display off and on (Android turned without reading them again).
             int attempt = _safeAreaRefresh.Tries;
-            string commands = display.Override is { } forced
+            bool barOnly = cutout == areas.Insets(target) && (!protect || duo.SafeAreaProtection == true && duo.SafeContent == areas.ContentBounds(target));
+            string commands = barOnly ? IPhoneDuo.RefreshStatusBar(target, display.Native) : display.Override is { } forced
                 ? IPhoneDuo.ForceSizeAgain(forced) + (attempt > 1 ? "; sleep 0.3; " + IPhoneDuo.RefreshSafeAreas : "")
+                    + (protect ? "; " + IPhoneDuo.RefreshSafeBounds(forced) : "")
+                    + "; " + IPhoneDuo.RefreshStatusBar(target, display.Native)
                 : IPhoneDuo.RefreshSafeAreas;
-            Log.Write($"'{Title}': safe areas {cutout} are not {target}'s {areas.Insets(target)}; " +
+            Log.Write($"'{Title}': safe areas {cutout}, app bounds {duo.SafeContent}, status bar {duo.StatusBarHeight}px are not {target}'s {areas.Insets(target)} / {areas.ContentBounds(target)}; " +
                 $"{(attempt > 1 ? "forcing the display size again and reading them again" : "forcing the display size again")} (try {attempt} of 3)");
-            RunAndroidTask(() => { inst.Shell(commands); return () => _nextPosePoll = DateTime.MinValue; });
+            RunAndroidTask(() =>
+            {
+                if (protect && duo.SafeAreaProtection != true && DuoSetup.EnsureSafeAreaSupport(inst) is { } error)
+                    Log.Write($"'{Title}': display-area protection: {error}");
+                inst.Shell(commands);
+                return () => _nextPosePoll = DateTime.MinValue;
+            });
         }
         else if (_safeAreaRefresh.GaveUp && !_safeAreaNoticeShown)
         {
@@ -1600,6 +1639,9 @@ internal sealed class EmulatorSession : IDisposable
         _seenPose = null;
         _seenUpright = null;
         _disagreeSince = null;
+        _safeAreaRefresh.Reset();
+        _safeAreaNoticeShown = false;
+        _duoChromeRetry.Reset();
         // Android's framework restarting is what loses WindowManager's safe areas: look at them soon after it is back.
         _nextCutoutCheck = DateTime.UtcNow.AddSeconds(5);
     }
@@ -1679,15 +1721,20 @@ internal sealed class EmulatorSession : IDisposable
     public void RunDoctor(Action<List<DuoDoctor.Finding>> done)
     {
         if (Instance is not { } instance) return;
-        var (title, pose, sdk) = (Title, _app.Config.Instance(Title).DuoPose, _app.Config.AndroidSdk);
+        var settings = _app.Config.Instance(Title);
+        var (title, pose, sdk) = (Title, settings.DuoPose, _app.Config.AndroidSdk);
         RunAndroidTask(() =>
         {
-            var findings = DuoDoctor.Run(instance, title, pose, sdk, repair: true);
+            var findings = DuoDoctor.Run(instance, title, pose, sdk, repair: true, settings);
             var display = MuMuControl.QueryDisplay(instance);
             return () =>
             {
                 if (display != null) { Display = display; Pose = IPhoneDuo.Detect(display); }
                 _resyncAttempts = 0;
+                _app.Config.Save();
+                _safeAreaRefresh.Reset();
+                _safeAreaNoticeShown = false;
+                _duoChromeRetry.Reset();
                 done(findings);
                 Sync();
             };
@@ -1698,6 +1745,12 @@ internal sealed class EmulatorSession : IDisposable
     public void RetryCutout()
     {
         _failedCutout = null;
+        _duoChromeRetry.Reset();
+        _duoChromeNotice = false;
+        _safeAreaRefresh.Reset();
+        _safeAreaNoticeShown = false;
+        _gesturesChecked = false;
+        _nextCutoutCheck = DateTime.MinValue;
         Sync();
     }
 
@@ -1744,18 +1797,30 @@ internal sealed class EmulatorSession : IDisposable
     /// <summary>adb and MuMuManager calls take from 100 ms to minutes; none of that may run on the UI thread.</summary>
     private void RunAndroidTask(Func<Action> work)
     {
+        if (_androidBusy) { _androidTasks.Enqueue(work); return; }
         _androidBusy = true;
+        var instance = Instance;
         Task.Run(() =>
         {
             Action? done = null;
-            try { done = work(); }
+            try
+            {
+                using var operation = instance?.ExclusiveOperation();
+                done = work();
+            }
             catch (Exception ex) { Log.Write($"'{Title}': Android task failed: {ex.Message}"); }
             _app.Post(() =>
             {
-                _androidBusy = false;
-                if (_disposed) return;
-                done?.Invoke();
-                if (!_androidBusy) StartWantedPose(); // a fold or unfold asked for while this task ran
+                try { if (!_disposed) done?.Invoke(); }
+                finally
+                {
+                    _androidBusy = false;
+                    if (!_disposed)
+                    {
+                        if (_androidTasks.TryDequeue(out var next)) RunAndroidTask(next);
+                        else StartWantedPose(); // the latest pose asked for while Android was busy
+                    }
+                }
             });
         });
     }
