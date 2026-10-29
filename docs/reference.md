@@ -80,9 +80,30 @@ unins000.exe /VERYSILENT [/REMOVESETTINGS=1] [/REMOVEOVERLAYS=1]
 
 ## Using it
 
+### App updates
+
+The app checks GitHub for a new stable release once a day, starting shortly after launch. An available update appears
+in the tray menu and a notification; click either to download and install it. **Check for app updates…** checks now.
+**Settings → Check for app updates automatically** turns the daily checks on or off. Checks run in the background;
+installation starts only after you choose it.
+
+The download is checked against the release's size and SHA-256 checksum before setup starts. Setup shows its progress,
+closes the tray app cleanly, installs in its current folder and restarts it. It keeps your frames, per-emulator choices
+and Start with Windows preference, and skips Android tools and Duo creation. ZIP users can use the same action; it
+runs the per-user installer in the extracted folder. **Settings → Cancel update download** cancels a download.
+Network failures leave the app running; retry from the tray menu. Installer details are in
+`%APPDATA%\MuMuDeviceFrames\update-install.log`.
+
+`MuMuDeviceFrames.exe --check-update` checks without launching the tray app (exit 0 on success, 1 on a check failure).
+
+### Controls
+
 | Action | Result |
 | --- | --- |
 | Drag the bezel | Moves the emulator (its title bar is hidden, so the bezel is the handle) |
+| Hold `Alt` | Reveals the floating shake button and iPhone Duo pose controls. They stay hidden otherwise, and disappear when Alt is released |
+| Shake button beside the phone | Sends a shake to Android's accelerometer. Tap again within 1.4 seconds to add strength (up to five bars); it holds briefly before fading back to the original sensor values |
+| `Ctrl+Shift+Alt` + left-drag the screen or bezel | Tilts the entire device with the pointer, up to 18° per axis, and updates Android's accelerometer. Release the mouse or modifiers, or press Escape, to ease back to neutral |
 | Right-click the bezel | Menu for that emulator: Copy, Save, Reload, Dev gear and Close apps tiles; on an iPhone Duo, the pose selector (click a pose to switch); a **Record entire frame** button when compatible ShareX is installed (it becomes **Stop recording** with the elapsed time while one runs); then frame, Android display, the iPhone Duo submenu (Check iPhone Duo, Keep apps clear of system areas, Animate folding, Show pose controls) and minimize |
 | Double-click the bezel | Peek: brings MuMu's title bar and toolbar back without dropping the frame; again to hide |
 | `Ctrl+Alt+F` | All frames off / on (off = emulators look exactly like stock MuMu) |
@@ -194,7 +215,7 @@ and the Android-matching switch are stored per emulator name. `log.txt` is next 
 | `DuoHotkey` | `Ctrl+Alt+D` | Fold or unfold the iPhone Duo in front (only while an emulator is the foreground window); empty string disables it. |
 | `DuoHalfHotkey` | `Ctrl+Alt+B` | Half open that iPhone Duo, or back to flat (same); empty string disables it. |
 | `DuoPoseHotkeys` | `Ctrl+Alt` | Modifiers for the six pose hotkeys, then 1 to 6 (same); empty string disables them. |
-| `DuoPoseControls` | `true` | The pose buttons beside an iPhone Duo |
+| `DuoPoseControls` | `true` | Allow the pose buttons beside an iPhone Duo while Alt is held; `false` keeps them hidden |
 | `LastActiveEmulator` | `null` | Last emulator used for Expo hotkeys when another app is in front. Updated automatically. |
 | `RecordingPadding` | `15` | Pixels to capture around every side of the full frame, from 0 to 500. |
 | `ShareXExecutable` | `null` | Optional path to a compatible ShareX.exe outside the usual install folders. |

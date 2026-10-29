@@ -71,6 +71,11 @@ internal sealed class AppConfig
     /// <summary>Clip the emulator window to the rounded screen shape so its title bar and borders vanish under the frame.</summary>
     public bool ClipToScreen { get; set; } = true;
 
+    /// <summary>Check GitHub for a new stable app release once a day. Installation is always the user's choice.</summary>
+    public bool AutomaticUpdateChecks { get; set; } = true;
+    public DateTime? LastUpdateCheckUtc { get; set; }
+    public string? LastNotifiedUpdate { get; set; }
+
     /// <summary>Pixels by which the bezel overlaps the emulator picture, so the anti-aliased inner edge always blends with app content.</summary>
     public int Overlap { get; set; } = 1;
 
@@ -95,7 +100,7 @@ internal sealed class AppConfig
     /// <summary>Modifiers for the six pose hotkeys, followed by 1 to 6 (closed, open, book, open portrait, tabletop, tent).</summary>
     public string DuoPoseHotkeys { get; set; } = "Ctrl+Alt";
 
-    /// <summary>The pose control beside an iPhone Duo frame.</summary>
+    /// <summary>Allow the pose control beside an iPhone Duo frame while Alt is held.</summary>
     public bool DuoPoseControls { get; set; } = true;
 
     /// <summary>Animate folding and unfolding (also off when Windows' "Animation effects" are off).</summary>

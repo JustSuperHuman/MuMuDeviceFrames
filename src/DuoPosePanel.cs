@@ -79,7 +79,12 @@ internal sealed class DuoPosePanel : IDisposable
         _window.SetVisible(true);
     }
 
-    public void Hide() => _window.SetVisible(false);
+    public void Hide()
+    {
+        _hover = -1;
+        _drawn = null;
+        _window.SetVisible(false);
+    }
 
     private static float PillHeight => 2 * Pad + IPhoneDuo.Poses.Length * Button + (IPhoneDuo.Poses.Length - 1) * Gap;
     private int Px(float logical) => (int)Math.Round(logical * _scale);

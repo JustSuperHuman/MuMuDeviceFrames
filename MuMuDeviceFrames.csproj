@@ -16,7 +16,7 @@
     <InvariantGlobalization>true</InvariantGlobalization>
     <TieredPGO>true</TieredPGO>
 
-    <Version>1.3.2</Version>
+    <Version>1.4.0</Version>
     <Product>MuMu Device Frames</Product>
     <Authors>James P. Verde</Authors>
     <Company>JustSuperHuman</Company>
@@ -27,6 +27,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="AndroidTools.Tests" />
     <Compile Remove="tests\**\*.cs" />
     <Content Include="tools\install-android-tools.ps1" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <!-- Public AOSP platform test key (build/make/target/product/security). MuMu's Android images are signed with it,

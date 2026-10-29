@@ -10,6 +10,31 @@ if (args is ["--hold-operation", var serial, var ready, var release])
     while (!File.Exists(release) && DateTime.UtcNow < deadline) Thread.Sleep(20);
     return;
 }
+if (args is ["--motion-live", var emulator])
+{
+    MotionTests.RunLive(emulator);
+    return;
+}
+if (args is ["--motion-render", var renderEmulator, var folder])
+{
+    MotionTests.Render(renderEmulator, folder);
+    return;
+}
+if (args is ["--update-live", var updateFolder])
+{
+    await AppUpdateTests.RunLive(updateFolder);
+    return;
+}
+AppUpdateTests.Run((condition, name) =>
+{
+    if (!condition) throw new Exception(name);
+    Console.WriteLine($"PASS {name}");
+});
+MotionTests.Run((condition, name) =>
+{
+    if (!condition) throw new Exception(name);
+    Console.WriteLine($"PASS {name}");
+});
 object? Call(string type, string method, params object?[] args) => assembly.GetType($"MuMuDeviceFrames.{type}")!
     .GetMethod(method, BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)!.Invoke(null, args);
 void Check(bool condition, string name)

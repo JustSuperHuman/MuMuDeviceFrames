@@ -3,7 +3,7 @@ using static MuMuDeviceFrames.Native;
 namespace MuMuDeviceFrames;
 
 /// <summary>One running emulator window together with its frame overlay.</summary>
-internal sealed class EmulatorSession : IDisposable
+internal sealed partial class EmulatorSession : IDisposable
 {
     public const string RenderClass = "nemuwin";
 
@@ -159,7 +159,7 @@ internal sealed class EmulatorSession : IDisposable
 
         // Minimised: the window manager hides and re-shows owned windows by itself. Keeping the clip region in place
         // avoids the title bar flashing up during the restore animation.
-        if (IsIconic(Main) && config.Enabled && instance.Enabled) return;
+        if (IsIconic(Main) && config.Enabled && instance.Enabled) { StopMotion(restore: false); return; }
 
         bool wanted = config.Enabled && instance.Enabled && Render != IntPtr.Zero
             && IsWindowVisible(Main) && !IsZoomed(Main) && !_app.IsBeingCreated(Title);
@@ -171,6 +171,8 @@ internal sealed class EmulatorSession : IDisposable
         // Minimised, or on its way there or back: Windows parks the window at -32000. Nothing is laid out from that
         // (moving it to the anchor from there put its restored place 35000 px off screen).
         if (wr.Left <= -30000 || wr.Top <= -30000 || rr.Left <= -30000 || rr.Top <= -30000) return;
+
+        if (KeepMotion(wr, rr)) return;
 
         if (FitMuMuWindow(wr, rr)) return; // MuMu's window is being resized to its picture; Sync runs again on the move
 
@@ -266,6 +268,7 @@ internal sealed class EmulatorSession : IDisposable
         EnsureStatusBar(new Point(rr.Left, rr.Top));
         EnsureChrome();
         EnsurePosePanel();
+        EnsureMotionPanel();
         _laidOut = (wr, rr);
     }
 
@@ -289,6 +292,7 @@ internal sealed class EmulatorSession : IDisposable
 
     private void EnsureChrome()
     {
+        if (_motionPreview?.Visible == true) return;
         var state = CurrentChrome();
         bool duo = IPhoneDuo.IsDuo(Frame) && state != null;
         if (Instance is { } instance && Display is { } display && !_androidBusy && !DuoSetupRunning.Contains(instance.AdbSerial))
@@ -817,6 +821,12 @@ internal sealed class EmulatorSession : IDisposable
             _panel?.Hide();
             return;
         }
+        WarmDuoFrames();
+        if (!ShowDeviceControls)
+        {
+            _panel?.Hide();
+            return;
+        }
         if (_panel is not { IsAlive: true })
         {
             try
@@ -837,12 +847,11 @@ internal sealed class EmulatorSession : IDisposable
         var device = Rectangle.FromLTRB(_pictureOnScreen.Left - border - left, _pictureOnScreen.Top - border - top, _pictureOnScreen.Right + border, _pictureOnScreen.Bottom + border);
         uint dpi = GetDpiForWindow(Main);
         _panel.Show(device, _animationTarget is { } going && _animation != null ? going : Pose, IsFoldable, dpi == 0 ? 1f : dpi / 96f);
-        WarmDuoFrames();
     }
 
     private void UpdateCompanions()
     {
-        if (_overlay != null) _overlay.Companions = [_bar, _glass, _panel?.Window];
+        if (_overlay != null) _overlay.Companions = [_bar, _glass, _chrome, _panel?.Window, _motionPanel?.Window];
     }
 
     /// <summary>
@@ -1263,6 +1272,7 @@ internal sealed class EmulatorSession : IDisposable
     /// <param name="source">Who asked (the pose panel, the menu, a hotkey, the command line), for the log.</param>
     public bool SetDuoPose(DuoPose pose, string source)
     {
+        StopMotion();
         Log.Write($"'{Title}': {IPhoneDuo.Variant(pose)} asked for by {source}");
         if (Display != null && !IsDuoSurface)
         {
@@ -1858,7 +1868,7 @@ internal sealed class EmulatorSession : IDisposable
         if (_overlay is { IsAlive: true }) return _overlay;
         try
         {
-            _overlay = new OverlayWindow(Main, _app.Config.BezelInteractive) { Companions = [_bar, _glass, _panel?.Window] };
+            _overlay = new OverlayWindow(Main, _app.Config.BezelInteractive) { Companions = [_bar, _glass, _chrome, _panel?.Window, _motionPanel?.Window] };
             _overlay.MenuRequested += () => _app.ShowSessionMenu(this);
             _overlay.DragEnded += () => { _reanchor = true; Sync(); };
             _overlay.DoubleClicked += () => { Peek = !Peek; Sync(); };
@@ -1961,6 +1971,8 @@ internal sealed class EmulatorSession : IDisposable
     /// <summary>Gives the emulator its normal look back and hides the frame (keeps the rendered bitmap for later).</summary>
     public void Suspend()
     {
+        StopMotion(restore: false);
+        _motionPanel?.Hide();
         _laidOut = null;
         _overlay?.SetVisible(false);
         _glass?.SetVisible(false);
@@ -1997,6 +2009,10 @@ internal sealed class EmulatorSession : IDisposable
     {
         if (_disposed) return;
         _disposed = true;
+        StopMotion(restore: false);
+        _motionTimer?.Dispose();
+        _motionPanel?.Dispose();
+        _motionDriver?.Dispose();
         foreach (var hook in _hooks) if (hook != IntPtr.Zero) UnhookWinEvent(hook);
         _hooks.Clear();
         ClearRegion();

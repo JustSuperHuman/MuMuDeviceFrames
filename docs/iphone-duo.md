@@ -63,7 +63,7 @@ MuMu and restart it, or turn off **Keep apps clear of system areas** to use app-
 
 | Fold / unfold | |
 | --- | --- |
-| Pose buttons | Beside the device, one per pose (`DuoPoseControls` turns them off) |
+| Hold `Alt` | Show the buttons beside the device, one per pose; release to hide them (`DuoPoseControls` turns them off entirely) |
 | `Ctrl+Alt+1` to `Ctrl+Alt+6` | Closed, Open, Book, Open portrait, Tabletop, Tent (`DuoPoseHotkeys` in the config) |
 | Bezel or tray menu | **Fold (outer display)**, **Half open (book)**, **Unfold (inner display)**; picking a pose in the Frame menu does the same |
 | `Ctrl+Alt+D` | Fold or unfold the active or last used emulator; half open folds (`DuoHotkey` in the config) |

@@ -5,7 +5,7 @@ using static MuMuDeviceFrames.Native;
 namespace MuMuDeviceFrames;
 
 /// <summary>Tray icon, emulator discovery, menus and global hotkeys.</summary>
-internal sealed class TrayApp : ApplicationContext
+internal sealed partial class TrayApp : ApplicationContext
 {
     private const int FramesHotkeyId = 1, ExpoReloadHotkeyId = 2, ExpoGearHotkeyId = 3, DuoHotkeyId = 4, DuoHalfHotkeyId = 5;
     /// <summary>Ctrl+Alt+1 to 5 (by default): one iPhone Duo pose each, in <see cref="IPhoneDuo.Poses"/> order.</summary>
@@ -23,12 +23,15 @@ internal sealed class TrayApp : ApplicationContext
     private readonly HiddenWindow _window;
     private readonly System.Windows.Forms.Timer _scanTimer;
     private readonly System.Windows.Forms.Timer _watchTimer;
+    private readonly System.Windows.Forms.Timer _controlsTimer;
+    private bool _controlsAltDown;
     private readonly SynchronizationContext _ui;
     private readonly Dictionary<IntPtr, EmulatorSession> _sessions = [];
     private readonly Dictionary<uint, bool> _pidIsEmulator = [];
     private readonly HashSet<uint> _expoBusy = [];
     private readonly WinEventProc _foregroundChanged;
     private readonly IntPtr _foregroundHook;
+    private readonly DeviceMotionInput _motionInput;
     private IntPtr _lastActiveEmulator;
     private Icon? _icon;
 
@@ -94,6 +97,17 @@ internal sealed class TrayApp : ApplicationContext
         _watchTimer.Tick += (_, _) => { foreach (var session in _sessions.Values.ToArray()) session.Watch(); };
         _watchTimer.Start();
         Scan();
+        _motionInput = new DeviceMotionInput(owner => _sessions.GetValueOrDefault(owner));
+        // Alt also reveals controls when the pointer is stationary. Only key transitions touch the panels.
+        _controlsTimer = new System.Windows.Forms.Timer { Interval = 50 };
+        _controlsTimer.Tick += (_, _) =>
+        {
+            bool held = DeviceMotionInput.AltDown;
+            if (held == _controlsAltDown) return;
+            _controlsAltDown = held;
+            foreach (var session in _sessions.Values.ToArray()) session.RefreshDeviceControls();
+        };
+        _controlsTimer.Start();
         _foregroundChanged = (_, _, hwnd, _, _, _, _) => TrackActiveEmulator(hwnd);
         _foregroundHook = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, IntPtr.Zero,
             _foregroundChanged, 0, 0, WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS);
@@ -108,6 +122,7 @@ internal sealed class TrayApp : ApplicationContext
 
         if (!File.Exists(AppConfig.FilePath)) Config.Save();
         Startup.Refresh();
+        InitializeUpdates();
         if (Library.DownloadedCount == 0) Post(OfferDownload);
     }
 
@@ -349,6 +364,7 @@ internal sealed class TrayApp : ApplicationContext
             items.Add(new MenuSeparator());
             var settings = new MenuItem("Settings", GearGlyph);
             AddAppItems(settings.DropDownItems);
+            items.Add(AppUpdateItem());
             items.Add(settings);
             items.Add(ExitItem());
         }
@@ -450,6 +466,16 @@ internal sealed class TrayApp : ApplicationContext
             try { Startup.Set(!Startup.IsEnabled); }
             catch (Exception ex) { Notify($"Could not change Start with Windows: {ex.Message}", warning: true); }
         }));
+        items.Add(new MenuSeparator());
+        items.Add(AppUpdateItem());
+        items.Add(Check("Check for app updates automatically", Config.AutomaticUpdateChecks, () =>
+        {
+            Config.AutomaticUpdateChecks = !Config.AutomaticUpdateChecks;
+            Config.Save();
+            if (Config.AutomaticUpdateChecks) CheckForAppUpdates(manual: false);
+        }, hint: "Daily"));
+        if (_updateDownload != null && !_installingUpdate)
+            items.Add(new MenuItem("Cancel update download", null, () => _updateDownload?.Cancel()));
     }
 
     private void AddSessionItems(ToolStripItemCollection items, EmulatorSession session)
@@ -468,6 +494,9 @@ internal sealed class TrayApp : ApplicationContext
                 $"Show/hide Expo dev menu gear  {Config.ExpoGearHotkey}".TrimEnd()),
             new Tile("Close apps", CloseAppsGlyph, () => CloseApps(session), connected,
                 "Close every app running in this emulator", Destructive: true)));
+
+        items.Add(new MenuItem("Shake device", PhoneGlyph, session.Shake)
+        { Enabled = session.CanMoveDevice, Hint = "Tap the side button to build strength" });
 
         bool duo = session.IsDuoSurface || IPhoneDuo.IsDuo(session.Frame);
         if (duo)
@@ -538,7 +567,7 @@ internal sealed class TrayApp : ApplicationContext
                 Config.DuoPoseControls = !Config.DuoPoseControls;
                 Config.Save();
                 SyncAll();
-            }));
+            }, hint: "While holding Alt"));
             items.Add(duoItems);
         }
         items.Add(new MenuItem("Minimize", MinimizeGlyph, () => PostMessageW(session.Main, WM_SYSCOMMAND, (IntPtr)SC_MINIMIZE, IntPtr.Zero)));
@@ -940,8 +969,11 @@ internal sealed class TrayApp : ApplicationContext
         });
     }
 
-    public void Notify(string text, bool warning = false) =>
+    public void Notify(string text, bool warning = false)
+    {
+        _updateNotification = false;
         _tray.ShowBalloonTip(6000, "MuMu Device Frames", text, warning ? ToolTipIcon.Warning : ToolTipIcon.Info);
+    }
 
     /// <summary>Category ▸ Model ▸ Variant, with a fit hint per model when the emulator picture size is known.</summary>
     private void AddFrameTree(ToolStripItemCollection items, string? selectedKey, Size? renderSize, Action<FrameInfo> choose, bool duoFits = false)
@@ -1008,6 +1040,9 @@ internal sealed class TrayApp : ApplicationContext
         Config.StatusBarClock = fresh.StatusBarClock; Config.StatusBarFont = fresh.StatusBarFont; Config.IosStatusBar = fresh.IosStatusBar;
         Config.LastActiveEmulator = fresh.LastActiveEmulator;
         Config.RecordingPadding = fresh.RecordingPadding;
+        Config.AutomaticUpdateChecks = fresh.AutomaticUpdateChecks;
+        Config.LastUpdateCheckUtc = fresh.LastUpdateCheckUtc;
+        Config.LastNotifiedUpdate = fresh.LastNotifiedUpdate;
         Config.DuoPoseControls = fresh.DuoPoseControls; Config.DuoAnimations = fresh.DuoAnimations; Config.DuoAnimationDump = fresh.DuoAnimationDump;
         Config.ShareXExecutable = fresh.ShareXExecutable;
         bool interactiveChanged = Config.BezelInteractive != fresh.BezelInteractive;
@@ -1238,8 +1273,11 @@ internal sealed class TrayApp : ApplicationContext
     /// <summary>Puts every emulator window back the way MuMu made it. Safe to call more than once.</summary>
     public void Shutdown()
     {
+        StopUpdates();
         _scanTimer.Stop();
         _watchTimer.Stop();
+        _controlsTimer.Stop();
+        _motionInput.Dispose();
         if (_foregroundHook != IntPtr.Zero) UnhookWinEvent(_foregroundHook);
         foreach (var session in _sessions.Values) session.Dispose();
         _sessions.Clear();
@@ -1248,6 +1286,7 @@ internal sealed class TrayApp : ApplicationContext
     protected override void ExitThreadCore()
     {
         Shutdown();
+        _controlsTimer.Dispose();
         foreach (int id in HotkeyIds) UnregisterHotKey(_window.Handle, id);
         _tray.Visible = false;
         _tray.Dispose();

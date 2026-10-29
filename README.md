@@ -44,6 +44,9 @@ Or in PowerShell:
 irm https://raw.githubusercontent.com/JustSuperHuman/MuMuDeviceFrames/main/install.ps1 | iex
 ```
 
+The app checks for updates daily. Use **Check for app updates…** in the tray menu to check now, then install and
+restart when you're ready. Your frames and settings are kept. Automatic checks can be switched off in **Settings**.
+
 ## Use
 
 <img src="docs/menu.png" alt="The bezel menu: Copy, Save, Reload, Dev gear and Close apps, the iPhone Duo pose selector, and Record" width="390">
@@ -51,6 +54,9 @@ irm https://raw.githubusercontent.com/JustSuperHuman/MuMuDeviceFrames/main/insta
 | | |
 | --- | --- |
 | Drag the bezel | Move the phone |
+| Hold `Alt` | Show the shake button and iPhone Duo fold controls; release to hide them |
+| Shake button beside the phone | Shake the device; tap again to increase strength |
+| `Ctrl+Shift+Alt` + drag the phone | Tilt with the mouse; release to return to neutral |
 | Right-click the bezel | Screenshot, record, change frame, iPhone Duo pose |
 | `Ctrl+Alt+F` | All frames off or on |
 | `Ctrl+Alt+1` to `Ctrl+Alt+6` | iPhone Duo poses (while an emulator is in front) |

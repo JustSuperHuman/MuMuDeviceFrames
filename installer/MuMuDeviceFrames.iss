@@ -7,6 +7,7 @@
 ;
 ; Silent: MuMuDeviceFrames-Setup.exe /VERYSILENT /SUPPRESSMSGBOXES [/TASKS="startup,frames,androidtools,duo"]
 ;         [/DUO=1] [/ANDROIDTOOLS=1] [/NOLAUNCH=1]
+; In-app update: /SILENT /NORESTART /UPDATE=1 /DIR="current app folder" (preserves startup, skips optional setup).
 ; Uninstall silently: unins000.exe /VERYSILENT [/REMOVESETTINGS=1] [/REMOVEOVERLAYS=1]
 
 #define AppName "MuMu Device Frames"
@@ -62,14 +63,15 @@ Source: "{#PublishDir}\*"; DestDir: "{app}"; Excludes: "*.pdb"; Flags: ignorever
 Name: "{userprograms}\{#AppName}"; Filename: "{app}\{#AppExe}"; WorkingDir: "{app}"; Comment: "Real device frames around MuMu Player windows"
 
 [Registry]
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "MuMuDeviceFrames"; ValueData: """{app}\{#AppExe}"""; Tasks: startup
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "MuMuDeviceFrames"; ValueData: """{app}\{#AppExe}"""; Tasks: startup; Check: NotUpdating
 
 [Run]
 Filename: "{app}\{#AppExe}"; Parameters: "--prepare"; StatusMsg: "Drawing the iPhone Duo frames..."; Flags: runhidden waituntilterminated
-Filename: "{app}\{#AppExe}"; Parameters: "--download"; StatusMsg: "Downloading the device frame set (about 35 MB)..."; Tasks: frames; Flags: runhidden waituntilterminated
+Filename: "{app}\{#AppExe}"; Parameters: "--download"; StatusMsg: "Downloading the device frame set (about 35 MB)..."; Tasks: frames; Check: NotUpdating; Flags: runhidden waituntilterminated
 Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\tools\install-android-tools.ps1"""; StatusMsg: "Setting up the Android display tools (a console shows the progress)..."; Check: WantAndroidTools; Flags: waituntilterminated
 Filename: "{app}\{#AppExe}"; Parameters: "--duo-create"; StatusMsg: "Creating the iPhone Duo emulator (a minute or two)..."; Check: WantDuo; Flags: runhidden waituntilterminated
 Filename: "{app}\{#AppExe}"; Description: "Launch {#AppName}"; WorkingDir: "{app}"; Flags: postinstall nowait; Check: ShouldLaunch
+Filename: "{app}\{#AppExe}"; WorkingDir: "{app}"; Flags: nowait; Check: RelaunchAfterUpdate
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}"
@@ -79,6 +81,16 @@ const
   HostWindow = 'MuMuDeviceFramesHost'; { the tray app's hidden window }
   ExitRequest = $8001;                 { WM_APP + 1: quit cleanly, giving the emulator windows back }
   RunKey = 'Software\Microsoft\Windows\CurrentVersion\Run';
+
+function IsUpdating: Boolean;
+begin
+  Result := ExpandConstant('{param:UPDATE|0}') = '1';
+end;
+
+function NotUpdating: Boolean;
+begin
+  Result := not IsUpdating;
+end;
 
 function MuMuInstalled: Boolean;
 begin
@@ -126,7 +138,12 @@ end;
 
 function ShouldLaunch: Boolean;
 begin
-  Result := ExpandConstant('{param:NOLAUNCH|0}') <> '1';
+  Result := not IsUpdating and (ExpandConstant('{param:NOLAUNCH|0}') <> '1');
+end;
+
+function RelaunchAfterUpdate: Boolean;
+begin
+  Result := IsUpdating and (ExpandConstant('{param:NOLAUNCH|0}') <> '1');
 end;
 
 { Asks the running tray app to quit (it restores the emulator windows on the way out) and waits for it. }
@@ -136,19 +153,19 @@ var
   I: Integer;
 begin
   Wnd := FindWindowByWindowName(HostWindow);
-  if Wnd = 0 then exit;
-  PostMessage(Wnd, ExitRequest, 0, 0);
-  for I := 1 to 60 do
+  if Wnd <> 0 then PostMessage(Wnd, ExitRequest, 0, 0);
+  for I := 1 to 150 do
   begin
+    { The window can disappear before the process releases its executable and single-instance mutex. }
+    if not CheckForMutexes('Local\MuMuDeviceFrames') then exit;
     Sleep(200);
-    if FindWindowByWindowName(HostWindow) = 0 then exit;
   end;
 end;
 
 function InitializeSetup: Boolean;
 begin
   Result := True;
-  if not MuMuInstalled then
+  if not IsUpdating and not MuMuInstalled then
     MsgBox('MuMu Player 12 was not found on this PC.' + #13#10#13#10 +
       'MuMu Device Frames frames MuMu Player emulators, so you will also want MuMu Player from https://www.mumuplayer.com/ . ' +
       'You can install MuMu Device Frames now and MuMu Player later.', mbInformation, MB_OK);
@@ -157,23 +174,25 @@ end;
 { The task, or /DUO=1 and /ANDROIDTOOLS=1 on the command line (also with /VERYSILENT and any /TASKS list). }
 function WantDuo: Boolean;
 begin
-  Result := MuMuInstalled and (WizardIsTaskSelected('duo') or (ExpandConstant('{param:DUO|0}') = '1'));
+  Result := not IsUpdating and MuMuInstalled and (WizardIsTaskSelected('duo') or (ExpandConstant('{param:DUO|0}') = '1'));
 end;
 
 function WantAndroidTools: Boolean;
 begin
-  Result := AndroidToolsMissing and (WizardIsTaskSelected('androidtools') or (ExpandConstant('{param:ANDROIDTOOLS|0}') = '1'));
+  Result := not IsUpdating and AndroidToolsMissing and (WizardIsTaskSelected('androidtools') or (ExpandConstant('{param:ANDROIDTOOLS|0}') = '1'));
 end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
   CloseRunningApp; { an upgrade replaces the exe; settings in %APPDATA% stay as they are }
   Result := '';
+  if CheckForMutexes('Local\MuMuDeviceFrames') then
+    Result := 'MuMu Device Frames is still closing. Please wait a moment and retry the update.';
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
-  if (CurStep = ssPostInstall) and not WizardIsTaskSelected('startup') then
+  if (CurStep = ssPostInstall) and not IsUpdating and not WizardIsTaskSelected('startup') then
     RegDeleteValue(HKEY_CURRENT_USER, RunKey, 'MuMuDeviceFrames');
 end;
 

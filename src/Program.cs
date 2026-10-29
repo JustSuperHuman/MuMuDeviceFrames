@@ -10,6 +10,20 @@ internal static class Program
     {
         ApplicationConfiguration.Initialize();
 
+        //   --check-update                    check the latest stable app release without starting the tray app
+        if (args is ["--check-update"])
+        {
+            try
+            {
+                using var updates = new AppUpdates();
+                var update = updates.CheckAsync(AppUpdates.CurrentVersion, CancellationToken.None).GetAwaiter().GetResult();
+                Say(update == null ? $"MuMu Device Frames {AppUpdates.DisplayVersion(AppUpdates.CurrentVersion)} is up to date."
+                    : $"MuMu Device Frames {update.DisplayVersion} is available. Install it from the tray menu.");
+                return 0;
+            }
+            catch (Exception ex) { Say($"Update check failed: {ex.Message}"); return 1; }
+        }
+
         // Maintenance commands (no tray):
         //   --restore                          un-clip every emulator window (after a crash or kill of this app)
         //   --snapshot <title> <out.png> [key|-] [checker|transparent|#RRGGBB]

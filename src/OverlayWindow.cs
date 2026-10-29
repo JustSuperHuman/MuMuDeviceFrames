@@ -53,6 +53,7 @@ internal sealed class OverlayWindow : NativeWindow
     public Func<int, Point, bool>? Mouse { get; set; }
 
     public byte Opacity { get; private set; } = 255;
+    internal (byte[] Pixels, Size Size)? Bitmap { get; private set; }
 
     /// <summary>Window-wide opacity, keeping the bitmap: what a cross-fade animates.</summary>
     public void SetOpacity(byte opacity)
@@ -85,6 +86,7 @@ internal sealed class OverlayWindow : NativeWindow
                 Log.Write($"UpdateLayeredWindow failed: {System.Runtime.InteropServices.Marshal.GetLastWin32Error()}");
             SelectObject(memDc, old);
             _position = position;
+            Bitmap = (premultiplied, new Size(width, height));
         }
         finally
         {
