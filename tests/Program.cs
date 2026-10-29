@@ -168,6 +168,10 @@ try
 
     // A capture requested while Open can return after Android has folded or turned upright. It must be identical
     // to a capture requested in the final pose, including the status element's placement and scale.
+    // Startup populates the built-in catalog before capture. Seed it explicitly on a clean test machine too:
+    // Compose resolves a replacement frame from this catalog when the captured pose differs from the request.
+    string builtInRoot = (string)assembly.GetType("MuMuDeviceFrames.AppConfig")!.GetProperty("BuiltInFramesRoot")!.GetValue(null)!;
+    Call("DuoFrames", "Ensure", builtInRoot);
     var chromeType = assembly.GetType("MuMuDeviceFrames.ChromeState")!;
     var kindType = assembly.GetType("MuMuDeviceFrames.ChromeKind")!;
     object Chrome(string kind, System.Drawing.Size screen) => Activator.CreateInstance(chromeType, Enum.Parse(kindType, kind), true, screen, 480, false, "9:41", false)!;
