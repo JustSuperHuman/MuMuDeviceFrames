@@ -42,9 +42,10 @@ accelerometer feels all of it, so shake gestures and motion effects react on cam
 ## Screenshots and recordings
 
 **Save** and **Copy** in the bezel menu capture the screen inside Android and place it in the frame at full resolution,
-with transparent corners. Windows covering the emulator don't end up in the shot. With a compatible ShareX build
-installed, **Record entire frame** films the phone with a small margin and leaves the mouse pointer out. It also saves
-every click, so ShareX's editor can add a tap ripple wherever a finger would have touched.
+with transparent corners. Windows covering the emulator don't end up in the shot. Install
+[ShareX with device frame recording](https://github.com/JustSuperHuman/ShareX/releases/latest) and **Record entire
+frame** films the phone with a small margin and leaves the mouse pointer out. It also saves every click, so ShareX's
+editor can add a tap ripple wherever a finger would have touched.
 
 ## Install
 

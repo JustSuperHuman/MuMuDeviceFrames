@@ -104,7 +104,7 @@ Network failures leave the app running; retry from the tray menu. Installer deta
 | Hold `Alt` | Reveals the floating shake button and iPhone Duo pose controls. They stay hidden otherwise, and disappear when Alt is released |
 | Shake button beside the phone | Sends a shake to Android's accelerometer. Tap again within 1.4 seconds to add strength (up to five bars); it holds briefly before fading back to the original sensor values |
 | `Ctrl+Shift+Alt` + left-drag the screen or bezel | Tilts the entire device with the pointer, up to 18° per axis, and updates Android's accelerometer. Release the mouse or modifiers, or press Escape, to ease back to neutral |
-| Right-click the bezel | Menu for that emulator: Copy, Save, Reload, Dev gear and Close apps tiles; on an iPhone Duo, the pose selector (click a pose to switch); a **Record entire frame** button when compatible ShareX is installed (it becomes **Stop recording** with the elapsed time while one runs); then frame, Android display, the iPhone Duo submenu (Check iPhone Duo, Keep apps clear of system areas, Animate folding, Show pose controls) and minimize |
+| Right-click the bezel | Menu for that emulator: Copy, Save, Reload, Dev gear and Close apps tiles; on an iPhone Duo, the pose selector (click a pose to switch); a **Record entire frame** button when [ShareX with device frame recording](#recording-the-full-frame) is installed (it becomes **Stop recording** with the elapsed time while one runs); then frame, Android display, the iPhone Duo submenu (Check iPhone Duo, Keep apps clear of system areas, Animate folding, Show pose controls) and minimize |
 | Double-click the bezel | Peek: brings MuMu's title bar and toolbar back without dropping the frame; again to hide |
 | `Ctrl+Alt+F` | All frames off / on (off = emulators look exactly like stock MuMu) |
 | `Ctrl+Alt+R` | Reload the Expo app in the active or last active emulator |
@@ -132,7 +132,9 @@ Landscape: when MuMu rotates its window, the frame rotates with it (phone top to
 
 ### Recording the full frame
 
-Install a compatible ShareX build with device frame recording support to show **Record entire frame** in each emulator menu. The command captures
+Install [ShareX with device frame recording](https://github.com/JustSuperHuman/ShareX/releases/latest), our ShareX
+fork, to show **Record entire frame** in each emulator menu. Its setup installs where the app looks for ShareX; with the
+portable zip, keep ShareX running or set `ShareXExecutable` in the config. The command captures
 the visible frame and 15 pixels around it on every side. Change **Recording padding** in the tray settings, or set
 `RecordingPadding` in the config to any value from 0 to 500. Keep the full frame and padding on one display before starting.
 Use **Stop recording** in the same menu or ShareX's recording controls when you're done. ShareX then shows your video actions and compatible saved quick-task presets.
