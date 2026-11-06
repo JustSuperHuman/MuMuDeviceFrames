@@ -33,10 +33,26 @@ Apple's foldable, folding live. Six poses, one click each, and the app keeps run
 Android becomes a real foldable: apps see the fold, and the Duo's safe areas sit exactly where iOS puts them.
 [How it works](docs/iphone-duo.md)
 
+## Shake it, tilt it
+
+Hold `Alt` and a shake button appears beside the phone. Tap it again quickly to shake harder, up to five levels. Hold
+`Ctrl+Shift+Alt` and drag to tilt the whole device up to 18°, then let go and it eases back to flat. Android's
+accelerometer feels all of it, so shake gestures and motion effects react on camera while the screen stays live.
+
+## Screenshots and recordings
+
+**Save** and **Copy** in the bezel menu capture the screen inside Android and place it in the frame at full resolution,
+with transparent corners. Windows covering the emulator don't end up in the shot. With a compatible ShareX build
+installed, **Record entire frame** films the phone with a small margin and leaves the mouse pointer out. It also saves
+every click, so ShareX's editor can add a tap ripple wherever a finger would have touched.
+
 ## Install
 
+Needs Windows and [MuMu Player 12](https://www.mumuplayer.com/).
+
 Download **MuMuDeviceFrames-Setup.exe** from [Releases](https://github.com/JustSuperHuman/MuMuDeviceFrames/releases)
-and run it. No admin rights needed. Tick **Set up an iPhone Duo emulator** to get a Duo too.
+and run it. No admin rights needed. Tick **Set up an iPhone Duo emulator** to get a Duo too. If you'd rather skip the
+installer, unzip **MuMuDeviceFrames-win-x64.zip** from the same page into any folder and run it from there.
 
 Or in PowerShell:
 
@@ -58,7 +74,9 @@ restart when you're ready. Your frames and settings are kept. Automatic checks c
 | Shake button beside the phone | Shake the device; tap again to increase strength |
 | `Ctrl+Shift+Alt` + drag the phone | Tilt with the mouse; release to return to neutral |
 | Right-click the bezel | Screenshot, record, change frame, iPhone Duo pose |
+| Double-click the bezel | Bring MuMu's title bar and toolbar back for a moment; again to hide them |
 | `Ctrl+Alt+F` | All frames off or on |
+| `Ctrl+Alt+R` / `Ctrl+Alt+G` | Reload the Expo app, or show and hide its dev gear |
 | `Ctrl+Alt+1` to `Ctrl+Alt+6` | iPhone Duo poses (while an emulator is in front) |
 
 Every option, hotkey and command is in the [reference](docs/reference.md).
