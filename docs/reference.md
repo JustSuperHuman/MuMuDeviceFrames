@@ -101,8 +101,10 @@ Network failures leave the app running; retry from the tray menu. Installer deta
 | Action | Result |
 | --- | --- |
 | Drag the bezel | Moves the emulator (its title bar is hidden, so the bezel is the handle) |
-| Hold `Alt` | Reveals the floating shake button and iPhone Duo pose controls. They stay hidden otherwise, and disappear when Alt is released |
+| Tab bar above the phone | Shown automatically when two or more framed emulators run with **Group emulators in tabs** enabled (on by default). Click a tab to swap to that emulator in place; right-click any tab to open its menu |
+| Hold `Alt` | Reveals the floating **Shake**, **Reset** and iPhone Duo pose controls beside the phone. They stay hidden otherwise, and disappear when Alt is released |
 | Shake button beside the phone | Sends a shake to Android's accelerometer. Tap again within 1.4 seconds to add strength (up to five bars); it holds briefly before fading back to the original sensor values |
+| Reset button beside the phone (or **Reset to frame** in the menu) | Repairs display resolution, density, Android and MuMu window orientation, letterboxing, window scale, cutout safe areas and the status bar for the chosen frame |
 | `Ctrl+Shift+Alt` + left-drag the screen or bezel | Tilts the entire device with the pointer, up to 18° per axis, and updates Android's accelerometer. Release the mouse or modifiers, or press Escape, to ease back to neutral |
 | Right-click the bezel | Menu for that emulator: Copy, Save, Reload, Dev gear and Close apps tiles; on an iPhone Duo, the pose selector (click a pose to switch); a **Record entire frame** button when [ShareX with device frame recording](#recording-the-full-frame) is installed (it becomes **Stop recording** with the elapsed time while one runs); then frame, Android display, the iPhone Duo submenu (Check iPhone Duo, Keep apps clear of system areas, Animate folding, Show pose controls) and minimize |
 | Double-click the bezel | Peek: brings MuMu's title bar and toolbar back without dropping the frame; again to hide |
@@ -208,6 +210,7 @@ and the Android-matching switch are stored per emulator name. `log.txt` is next 
 | --- | --- | --- |
 | `FramesRoot` | `%APPDATA%\MuMuDeviceFrames\frames` | Frame set folder. A `device-frames-output` folder next to the exe is used if present. |
 | `DefaultFrame` | `null` (best aspect match) | `"Category/Model/Variant"`, e.g. `"Apple iPhone/17 Pro Max/Cosmic Orange"` |
+| `GroupEmulators` | `true` | Stack running emulators onto one shared position (`GroupAnchor`) with a tab bar above the phone to swap between them |
 | `ClipToScreen` | `true` | Hide the MuMu window around the picture |
 | `Overlap` | `1` | Pixels the bezel overlaps the picture, so its anti-aliased edge blends with app content |
 | `BezelInteractive` | `true` | `false` makes the frame fully click-through |
@@ -233,7 +236,7 @@ area and home-indicator area outside app windows. Set it to `false` to test an a
 or use **iPhone Duo ▸ Keep apps clear of system areas** in its bezel menu. This can relaunch open apps once when the
 overlay changes. [Duo setup and safe areas](iphone-duo.md) describes the root requirement and usable window sizes.
 
-Command line: `--exit` (quit the running instance cleanly) · `--expo-reload [emulator]` / `--expo-gear [emulator]` (Expo actions; omit the name to use the running tray app) · `--startup on|off` (start with Windows) · `--restore` (un-clip all emulator windows; only needed if
+Command line: `--exit` (quit the running instance cleanly) · `--group on|off` (turn emulator tab grouping on or off) · `--reset [emulator|--all]` (fix orientation, screen size, window fit and safe areas for the active, named or every running emulator) · `--expo-reload [emulator]` / `--expo-gear [emulator]` (Expo actions; omit the name to use the running tray app) · `--startup on|off` (start with Windows) · `--restore` (un-clip all emulator windows; only needed if
 the app was killed; starting it again does the same) · `--download [folder]` (fetch the frame set) ·
 `--screenshot <emulator> <out.png> [frame] [transparent|checker|#RRGGBB]` (framed screenshot at native resolution) ·
 `--snapshot <emulator> <out.png> [frame|-] [background]` (composite of the window and the frame, for checking

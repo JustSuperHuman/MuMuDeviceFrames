@@ -33,6 +33,9 @@ internal sealed partial class TrayApp : ApplicationContext
     private readonly IntPtr _foregroundHook;
     private readonly DeviceMotionInput _motionInput;
     private IntPtr _lastActiveEmulator;
+    private IntPtr _activeGroupMain;
+    private string? _preferredGroupTitle;
+    private (string Title, DateTime Until)? _restartingGroupMember;
     private Icon? _icon;
 
     public AppConfig Config { get; }
@@ -81,7 +84,7 @@ internal sealed partial class TrayApp : ApplicationContext
         Config = AppConfig.Load();
         Library = FrameLibrary.Load(Config.FramesRoot);
 
-        _window = new HiddenWindow(OnHotkey, RunExpoAction, RecordFrameByName, SetDuoPoseByName, SetFrameByName, MarkDuoCreating, MenuShot, ExitThread);
+        _window = new HiddenWindow(OnHotkey, RunExpoAction, RecordFrameByName, SetDuoPoseByName, SetFrameByName, MarkDuoCreating, MenuShot, ResetByName, SetGroupMode, ExitThread);
         RegisterHotkeys();
 
         _trayMenu.Opening += (_, _) => BuildMenu(_trayMenu, null);
@@ -265,10 +268,13 @@ internal sealed partial class TrayApp : ApplicationContext
         }, IntPtr.Zero);
 
         foreach (var session in _sessions.Values)
-        {
             session.RefreshTitle();
-            session.Sync();
-        }
+
+        var activeGroup = ActiveGroupSession();
+        activeGroup?.Sync();
+        foreach (var session in _sessions.Values)
+            if (session != activeGroup) session.Sync();
+        activeGroup?.EnsureTabsPanel();
 
         TrackActiveEmulator(GetForegroundWindow());
 
@@ -293,11 +299,14 @@ internal sealed partial class TrayApp : ApplicationContext
 
     private void SyncAll(bool invalidate = false)
     {
+        if (invalidate)
+            foreach (var session in _sessions.Values) session.Invalidate();
+
+        var activeGroup = ActiveGroupSession();
+        activeGroup?.Sync();
         foreach (var session in _sessions.Values)
-        {
-            if (invalidate) session.Invalidate();
-            session.Sync();
-        }
+            if (session != activeGroup) session.Sync();
+        activeGroup?.EnsureTabsPanel();
     }
 
     private void ToggleAll()
@@ -305,6 +314,197 @@ internal sealed partial class TrayApp : ApplicationContext
         Config.Enabled = !Config.Enabled;
         Config.Save();
         SyncAll();
+    }
+
+    // ---- emulator tab grouping & reset --------------------------------------------------------------------------
+
+    internal List<EmulatorSession> GroupSessions()
+    {
+        if (!Config.Enabled || !Config.GroupEmulators) return [];
+        return _sessions.Values
+            .Where(s => !s.IsGone && IsWindowVisible(s.Main) && Config.Instance(s.Title).Enabled
+                && !IsBeingCreated(s.Title) && !IsZoomed(s.Main) && !s.IsFullscreen)
+            .OrderBy(s => s.Title, Comparer<string>.Create(StrCmpLogicalW))
+            .ThenBy(s => s.Main.ToInt64())
+            .ToList();
+    }
+
+    internal EmulatorSession? ActiveGroupSession(IReadOnlyList<EmulatorSession>? group = null)
+    {
+        group ??= GroupSessions();
+        if (group.Count == 0) return null;
+
+        if (_restartingGroupMember is { } restarting)
+        {
+            if (DateTime.UtcNow > restarting.Until) _restartingGroupMember = null;
+            else if (group.FirstOrDefault(s => string.Equals(s.Title, restarting.Title, StringComparison.OrdinalIgnoreCase)) is { } back)
+            {
+                _restartingGroupMember = null;
+                _activeGroupMain = back.Main;
+                _preferredGroupTitle = back.Title;
+                return back;
+            }
+        }
+
+        if (group.FirstOrDefault(s => s.Main == _activeGroupMain) is { } current)
+            return current;
+
+        string? wantedTitle = _preferredGroupTitle ?? Config.LastActiveEmulator;
+        var chosen = (wantedTitle != null
+                ? group.FirstOrDefault(s => !IsIconic(s.Main) && string.Equals(s.Title, wantedTitle, StringComparison.OrdinalIgnoreCase))
+                : null)
+            ?? group.FirstOrDefault(s => !IsIconic(s.Main) && s.Main == _lastActiveEmulator)
+            ?? group.FirstOrDefault(s => !IsIconic(s.Main))
+            ?? group[0];
+
+        _activeGroupMain = chosen.Main;
+        _preferredGroupTitle = chosen.Title;
+        return chosen;
+    }
+
+    public bool IsGrouped(EmulatorSession session) => GroupSessions().Contains(session);
+
+    public bool IsHiddenInGroup(EmulatorSession session)
+    {
+        var group = GroupSessions();
+        if (!group.Contains(session)) return false;
+        var active = ActiveGroupSession(group);
+        return active != null && active != session;
+    }
+
+    public bool HasVisibleGroupTabs(EmulatorSession session)
+    {
+        var group = GroupSessions();
+        return group.Count >= 2 && ActiveGroupSession(group) == session;
+    }
+
+    public IReadOnlyList<EmulatorTab> BuildGroupTabs()
+    {
+        var group = GroupSessions();
+        var active = ActiveGroupSession(group);
+        return group.Select(s => new EmulatorTab(s.Main, s.Title, s.TabKind, s.Pose, s == active)).ToList();
+    }
+
+    public void RefreshActiveGroupTabs() => ActiveGroupSession()?.EnsureTabsPanel();
+
+    public void SelectGroupByHandle(IntPtr main)
+    {
+        if (_sessions.TryGetValue(main, out var session))
+            SelectGroupSession(session, activateWindow: true);
+    }
+
+    public void ShowMenuByHandle(IntPtr main)
+    {
+        if (_sessions.TryGetValue(main, out var session))
+            ShowSessionMenu(session);
+    }
+
+    public void SelectGroupSession(EmulatorSession target, bool activateWindow)
+    {
+        if (Config.GroupEmulators && Config.GroupAnchor == null)
+        {
+            var donor = ActiveGroupSession();
+            if (donor?.CurrentFrameCentre is { } centre)
+                Config.GroupAnchor = new AnchorPoint(centre.X, centre.Y);
+            else if (Config.Instance(target.Title).Anchor is { } saved)
+                Config.GroupAnchor = new AnchorPoint(saved.X, saved.Y);
+        }
+
+        _activeGroupMain = target.Main;
+        _preferredGroupTitle = target.Title;
+        _restartingGroupMember = null;
+        RememberEmulator(target);
+
+        target.ActivateInGroup();
+        if (activateWindow && !target.IsGone)
+            SetForegroundWindow(target.Main);
+
+        foreach (var other in _sessions.Values.ToArray())
+            if (other != target) other.Sync();
+
+        target.EnsureTabsPanel();
+    }
+
+    private void ToggleGrouping() => SetGroupMode(!Config.GroupEmulators);
+
+    private bool SetGroupMode(bool enabled)
+    {
+        if (enabled && !Config.GroupEmulators)
+        {
+            var current = FindTarget(null);
+            if (current?.CurrentFrameCentre is { } centre)
+            {
+                Config.GroupAnchor = new AnchorPoint(centre.X, centre.Y);
+                _activeGroupMain = current.Main;
+                _preferredGroupTitle = current.Title;
+            }
+        }
+        Config.GroupEmulators = enabled;
+        Config.Save();
+        SyncAll();
+        return true;
+    }
+
+    public void PrepareForReset(EmulatorSession session)
+    {
+        foreach (var key in _fitAttempts.Keys.Where(k => k.StartsWith(session.Title + "|", StringComparison.OrdinalIgnoreCase)).ToList())
+            _fitAttempts.Remove(key);
+        if (Config.GroupEmulators)
+        {
+            _activeGroupMain = session.Main;
+            _preferredGroupTitle = session.Title;
+            _restartingGroupMember = (session.Title, DateTime.UtcNow.AddMinutes(4));
+        }
+        RememberEmulator(session);
+    }
+
+    public Size? CurrentRenderSizeOf(string title)
+    {
+        var session = _sessions.Values.FirstOrDefault(s => !s.IsGone && string.Equals(s.Title, title, StringComparison.OrdinalIgnoreCase));
+        if (session == null || !GetWindowRect(session.Render, out var rr) || rr.Left <= -30000 || rr.Width <= 0 || rr.Height <= 0)
+            return null;
+        return new Size(rr.Width, rr.Height);
+    }
+
+    public void CompleteReset(string title, FrameInfo frame, ResetResult result)
+    {
+        Config.Save();
+        Scan();
+        var live = _sessions.Values.FirstOrDefault(s => !s.IsGone && string.Equals(s.Title, title, StringComparison.OrdinalIgnoreCase));
+        if (live != null)
+        {
+            if (Config.GroupEmulators && string.Equals(_preferredGroupTitle, title, StringComparison.OrdinalIgnoreCase))
+                _activeGroupMain = live.Main;
+            live.ApplyPostResetGeometry(frame, result.Display, result.Pose);
+            SyncAll();
+        }
+        Log.Write($"Reset '{title}': {result.Summary}");
+        Notify(result.Summary, warning: !result.Ok);
+        if (result.MissingTools) OfferAndroidTools();
+    }
+
+    private void ResetAllSessions()
+    {
+        foreach (var session in _sessions.Values.OrderBy(s => s.Title, Comparer<string>.Create(StrCmpLogicalW)).ToArray())
+            session.ResetToFrame();
+    }
+
+    private bool ResetByName(string? name)
+    {
+        if (string.Equals(name, "--all", StringComparison.OrdinalIgnoreCase))
+        {
+            if (_sessions.Count == 0) return false;
+            ResetAllSessions();
+            return true;
+        }
+        var target = FindTarget(name);
+        if (target == null)
+        {
+            Log.Write($"Reset: emulator '{name ?? "active"}' not found");
+            return false;
+        }
+        target.ResetToFrame();
+        return true;
     }
 
     // ---- menus --------------------------------------------------------------------------------------------------
@@ -323,6 +523,8 @@ internal sealed partial class TrayApp : ApplicationContext
         RefreshGlyph = "\uE72C", GearGlyph = "\uE713", DownloadGlyph = "\uE896", FolderGlyph = "\uE838",
         PowerGlyph = "\uE7E8", CloseAppsGlyph = "\uE8BB", MinimizeGlyph = "\uE921", DisplayGlyph = "\uE7F4", DevGlyph = "\uEC7A", VideoGlyph = "\uE714";
 
+    private const string ResetGlyph = "", TabsGlyph = "";
+
     private void BuildMenu(ContextMenuStrip menu, EmulatorSession? focus)
     {
         menu.Items.Clear();
@@ -336,6 +538,7 @@ internal sealed partial class TrayApp : ApplicationContext
             AddSessionItems(items, focus);
             items.Add(new MenuSeparator());
             items.Add(FramesEnabledItem());
+            items.Add(GroupEmulatorsItem());
             var app = new MenuItem("MuMu Device Frames", GearGlyph);
             AddGlobalItems(app.DropDownItems);
             app.DropDownItems.Add(new MenuSeparator());
@@ -350,13 +553,36 @@ internal sealed partial class TrayApp : ApplicationContext
             items.Add(new MenuTitle("MuMu Device Frames", running, PhoneGlyph));
             items.Add(new MenuSeparator());
             items.Add(FramesEnabledItem());
+            items.Add(GroupEmulatorsItem());
             items.Add(new MenuSeparator());
             if (_sessions.Count == 0) items.Add(new MenuItem("Start a MuMu emulator to frame it") { Enabled = false });
-            foreach (var session in _sessions.Values.OrderBy(s => s.Title, StringComparer.OrdinalIgnoreCase))
+            var group = GroupSessions();
+            var activeGroup = group.Count >= 2 ? ActiveGroupSession(group) : null;
+            foreach (var session in _sessions.Values.OrderBy(s => s.Title, Comparer<string>.Create(StrCmpLogicalW)))
             {
-                var item = new MenuItem(session.Title, PhoneGlyph) { Hint = session.Frame?.Model ?? "No frame" };
+                bool isActiveTab = activeGroup == session;
+                string model = session.Frame?.Model ?? "No frame";
+                var item = new MenuItem(session.Title, PhoneGlyph)
+                {
+                    Hint = isActiveTab ? $"Active · {model}" : model,
+                    HintTone = isActiveTab ? HintTone.Good : HintTone.Secondary,
+                };
+                if (group.Count >= 2 && group.Contains(session) && !isActiveTab)
+                {
+                    item.DropDownItems.Add(new MenuItem("Switch to this tab", TabsGlyph, () => SelectGroupSession(session, activateWindow: true)));
+                    item.DropDownItems.Add(new MenuSeparator());
+                }
                 AddSessionItems(item.DropDownItems, session);
                 items.Add(item);
+            }
+            if (_sessions.Count > 0)
+            {
+                bool anyResetting = _sessions.Values.Any(s => s.IsResetting);
+                items.Add(new MenuItem(_sessions.Count == 1 ? "Reset emulator to frame" : "Reset all emulators to frames", ResetGlyph, ResetAllSessions)
+                {
+                    Enabled = !anyResetting,
+                    Hint = "Orientation & screen size",
+                });
             }
             items.Add(new MenuItem(_creatingDuo ? "Creating an iPhone Duo emulator…" : "Create iPhone Duo emulator…", PhoneGlyph, CreateDuo) { Enabled = !_creatingDuo });
             items.Add(new MenuSeparator());
@@ -373,6 +599,13 @@ internal sealed partial class TrayApp : ApplicationContext
     }
 
     private MenuItem FramesEnabledItem() => Check("Show device frames", Config.Enabled, ToggleAll, hint: Config.Hotkey);
+
+    private MenuItem GroupEmulatorsItem()
+    {
+        int count = GroupSessions().Count;
+        string hint = Config.GroupEmulators && count >= 2 ? $"{count} tabs on top" : "Tab bar on top";
+        return Check("Group emulators in tabs", Config.GroupEmulators, ToggleGrouping, hint: hint);
+    }
 
     private MenuItem ExitItem() => new("Exit", PowerGlyph, ExitThread) { Hint = "Restores emulators" };
 
@@ -495,6 +728,11 @@ internal sealed partial class TrayApp : ApplicationContext
             new Tile("Close apps", CloseAppsGlyph, () => CloseApps(session), connected,
                 "Close every app running in this emulator", Destructive: true)));
 
+        items.Add(new MenuItem(session.IsResetting ? "Resetting to frame…" : "Reset to frame", ResetGlyph, session.ResetToFrame)
+        {
+            Enabled = !session.IsResetting && (session.Frame != null || Library.Frames.Count > 0),
+            Hint = "Fixes size, orientation & safe areas",
+        });
         items.Add(new MenuItem("Shake device", PhoneGlyph, session.Shake)
         { Enabled = session.CanMoveDevice, Hint = "Tap the side button to build strength" });
 
@@ -575,6 +813,11 @@ internal sealed partial class TrayApp : ApplicationContext
 
     private void AddAndroidItems(ToolStripItemCollection items, EmulatorSession session, InstanceConfig instance, bool connected)
     {
+        items.Add(new MenuItem(session.IsResetting ? "Resetting to frame…" : "Reset display & orientation", ResetGlyph, session.ResetToFrame)
+        {
+            Enabled = !session.IsResetting && (session.Frame != null || Library.Frames.Count > 0),
+            Hint = "Full repair",
+        });
         items.Add(FitItem(session, instance));
         items.Add(new MenuSeparator());
         if (IPhoneDuo.IsDuo(session.Frame))
@@ -714,11 +957,12 @@ internal sealed partial class TrayApp : ApplicationContext
         if (dialog.ShowDialog() == DialogResult.OK) SetRecordingPadding((int)value.Value);
     }
 
-    /// <summary>The named emulator, or else the active, last used, remembered or only one.</summary>
+    /// <summary>The named emulator, or else the active, grouped, last used, remembered or only one.</summary>
     private EmulatorSession? FindTarget(string? name)
     {
         EmulatorSession? target = name == null ? SessionForWindow(GetForegroundWindow()) :
             _sessions.Values.FirstOrDefault(session => string.Equals(session.Title, name, StringComparison.OrdinalIgnoreCase));
+        if (name == null && target == null && Config.GroupEmulators && ActiveGroupSession() is { } grouped) target = grouped;
         if (name == null && target == null && _sessions.TryGetValue(_lastActiveEmulator, out var last)) target = last;
         if (name == null && target == null && Config.LastActiveEmulator is { } saved)
             target = _sessions.Values.FirstOrDefault(session => string.Equals(session.Title, saved, StringComparison.OrdinalIgnoreCase));
@@ -1034,6 +1278,7 @@ internal sealed partial class TrayApp : ApplicationContext
     {
         var fresh = AppConfig.Load();
         Config.FramesRoot = fresh.FramesRoot; Config.DefaultFrame = fresh.DefaultFrame; Config.Enabled = fresh.Enabled;
+        Config.GroupEmulators = fresh.GroupEmulators; Config.GroupAnchor = fresh.GroupAnchor;
         Config.ClipToScreen = fresh.ClipToScreen; Config.Overlap = fresh.Overlap; Config.ProcessNames = fresh.ProcessNames;
         Config.Instances = fresh.Instances;
         Config.AndroidSdk = fresh.AndroidSdk; Config.StatusBarPaddingFactor = fresh.StatusBarPaddingFactor;
@@ -1097,6 +1342,11 @@ internal sealed partial class TrayApp : ApplicationContext
         if (target == null)
         {
             target = SessionForWindow(GetForegroundWindow());
+            if (target == null && Config.GroupEmulators && ActiveGroupSession() is { } grouped)
+            {
+                target = grouped;
+                selection = "active tab";
+            }
             if (target == null && _sessions.TryGetValue(_lastActiveEmulator, out var last))
             {
                 target = last;
@@ -1160,7 +1410,16 @@ internal sealed partial class TrayApp : ApplicationContext
 
     private void TrackActiveEmulator(IntPtr hwnd)
     {
-        if (SessionForWindow(hwnd) is { } session) RememberEmulator(session);
+        if (SessionForWindow(hwnd) is { } session)
+        {
+            RememberEmulator(session);
+            if (Config.Enabled && Config.GroupEmulators && !IsIconic(session.Main))
+            {
+                var group = GroupSessions();
+                if (group.Contains(session) && ActiveGroupSession(group) != session)
+                    SelectGroupSession(session, activateWindow: false);
+            }
+        }
         UpdatePoseHotkeys(hwnd);
     }
 
@@ -1332,6 +1591,12 @@ internal sealed partial class TrayApp : ApplicationContext
         SendToRunningInstance(HiddenWindow.SetFrameData, name + "" + (key ?? ""));
 
     /// <summary>True when the tray app is running (so commands go through it and its frames follow).</summary>
+    public static bool RequestResetOfRunningInstance(string? name) =>
+        SendToRunningInstance(HiddenWindow.ResetData, name);
+
+    public static bool RequestGroupModeOfRunningInstance(bool enabled) =>
+        SendToRunningInstance(HiddenWindow.GroupModeData, enabled ? "1" : "0");
+
     public static bool IsRunning => FindWindowW(null, HiddenWindow.WindowCaption) != IntPtr.Zero;
 
     private static bool SendToRunningInstance(int dataId, string? name)
@@ -1361,7 +1626,7 @@ internal sealed partial class TrayApp : ApplicationContext
         public const int WM_EXIT_REQUEST = 0x8000 + 1; // WM_APP + 1, posted by "MuMuDeviceFrames.exe --exit"
         public const int WM_EXPO_RELOAD = 0x8000 + 2, WM_EXPO_GEAR = 0x8000 + 3;
         /// <summary>WM_COPYDATA kinds; the payload is an emulator name (empty for the active one).</summary>
-        public const int RecordFrameData = 1, SetFrameData = 2, DuoCreatingData = 3, MenuShotData = 4, DuoPoseData = 10; // DuoPoseData + (int)pose
+        public const int RecordFrameData = 1, SetFrameData = 2, DuoCreatingData = 3, MenuShotData = 4, ResetData = 5, GroupModeData = 6, DuoPoseData = 10; // DuoPoseData + (int)pose
 
         private readonly Action<int> _onHotkey;
         private readonly Func<ExpoAction, bool> _onExpoAction;
@@ -1370,15 +1635,19 @@ internal sealed partial class TrayApp : ApplicationContext
         private readonly Func<string, string?, bool> _onSetFrame;
         private readonly Func<string, bool, bool> _onDuoCreating;
         private readonly Func<string, string, bool, double, int?, bool> _onMenuShot;
+        private readonly Func<string?, bool> _onReset;
+        private readonly Func<bool, bool> _onGroupMode;
         private readonly Action _onExit;
 
         public HiddenWindow(Action<int> onHotkey, Func<ExpoAction, bool> onExpoAction, Func<string?, bool> onRecordFrame,
             Func<string?, DuoPose?, bool> onDuoPose, Func<string, string?, bool> onSetFrame, Func<string, bool, bool> onDuoCreating,
-            Func<string, string, bool, double, int?, bool> onMenuShot, Action onExit)
+            Func<string, string, bool, double, int?, bool> onMenuShot, Func<string?, bool> onReset, Func<bool, bool> onGroupMode, Action onExit)
         {
             _onSetFrame = onSetFrame;
             _onDuoCreating = onDuoCreating;
             _onMenuShot = onMenuShot;
+            _onReset = onReset;
+            _onGroupMode = onGroupMode;
             _onHotkey = onHotkey;
             _onExpoAction = onExpoAction;
             _onRecordFrame = onRecordFrame;
@@ -1397,7 +1666,7 @@ internal sealed partial class TrayApp : ApplicationContext
             {
                 var data = System.Runtime.InteropServices.Marshal.PtrToStructure<COPYDATASTRUCT>(m.LParam);
                 bool pose = data.DataId >= DuoPoseData && data.DataId < DuoPoseData + IPhoneDuo.Poses.Length;
-                if ((data.DataId == RecordFrameData || data.DataId == SetFrameData || data.DataId == DuoCreatingData || data.DataId == MenuShotData || pose)
+                if ((data.DataId is RecordFrameData or SetFrameData or DuoCreatingData or MenuShotData or ResetData or GroupModeData || pose)
                     && data.Data != IntPtr.Zero && data.ByteCount is >= 2 and <= 1002 && data.ByteCount % 2 == 0)
                 {
                     string? name = System.Runtime.InteropServices.Marshal.PtrToStringUni(data.Data, data.ByteCount / 2 - 1);
@@ -1420,8 +1689,14 @@ internal sealed partial class TrayApp : ApplicationContext
                         m.Result = parts.Length == 2 && _onSetFrame(parts[0], parts[1].Length == 0 ? null : parts[1]) ? (IntPtr)1 : IntPtr.Zero;
                         return;
                     }
+                    if (data.DataId == GroupModeData)
+                    {
+                        m.Result = name.Length == 1 && _onGroupMode(name[0] == '1') ? (IntPtr)1 : IntPtr.Zero;
+                        return;
+                    }
                     if (string.IsNullOrWhiteSpace(name)) name = null;
                     bool ok = data.DataId == RecordFrameData ? _onRecordFrame(name)
+                        : data.DataId == ResetData ? _onReset(name)
                         : _onDuoPose(name, (DuoPose)(int)(data.DataId - DuoPoseData));
                     m.Result = ok ? (IntPtr)1 : IntPtr.Zero;
                 }

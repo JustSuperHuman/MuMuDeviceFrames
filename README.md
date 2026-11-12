@@ -10,6 +10,11 @@ screen recordings and screenshots.
 ![Stock MuMu window next to the same emulator with a device frame](docs/before-after.png)
 
 MuMu's window disappears and the frame goes wherever the emulator goes. 145 iPhone, Pixel, Galaxy and iPad frames.
+Open more than one emulator and they stack neatly in the same spot with a tab bar above the phone to swap between them.
+If an emulator ever drifts sideways or out of scale, **Reset to frame** puts its orientation, resolution, safe areas
+and window size back in one click.
+
+![Grouped emulator tabs above an iPhone 17 Pro frame with Shake and Reset side controls](docs/tabs-and-reset.png)
 
 ## Android lays out like the phone
 
@@ -71,10 +76,11 @@ restart when you're ready. Your frames and settings are kept. Automatic checks c
 | | |
 | --- | --- |
 | Drag the bezel | Move the phone |
-| Hold `Alt` | Show the shake button and iPhone Duo fold controls; release to hide them |
-| Shake button beside the phone | Shake the device; tap again to increase strength |
+| Tab bar above the phone | Swap between running emulators (right-click any tab for its menu) |
+| Hold `Alt` | Show the shake, reset and iPhone Duo fold controls; release to hide them |
+| Shake / Reset beside the phone | Shake the device (tap again for more strength), or reset orientation, size and safe areas to match the frame |
 | `Ctrl+Shift+Alt` + drag the phone | Tilt with the mouse; release to return to neutral |
-| Right-click the bezel | Screenshot, record, change frame, iPhone Duo pose |
+| Right-click the bezel | Screenshot, record, reset to frame, change frame, iPhone Duo pose |
 | Double-click the bezel | Bring MuMu's title bar and toolbar back for a moment; again to hide them |
 | `Ctrl+Alt+F` | All frames off or on |
 | `Ctrl+Alt+R` / `Ctrl+Alt+G` | Reload the Expo app, or show and hide its dev gear |

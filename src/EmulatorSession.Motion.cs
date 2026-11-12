@@ -37,6 +37,7 @@ internal sealed partial class EmulatorSession
     }
 
     public bool CanMoveDevice => !_disposed && !IsGone && !IsIconic(Main) && Instance != null && _current != null
+        && !_app.IsHiddenInGroup(this)
         && _app.Config.Enabled && _app.Config.Instance(Title).Enabled
         && _animation == null && _fadeTimer?.Enabled != true && _overlay is { IsAlive: true }
         && (_overlay.IsVisible || _motionState != null);
@@ -133,6 +134,7 @@ internal sealed partial class EmulatorSession
             _motionPreview ??= new DeviceMotionPreview(Main, new Size(_motionFrame!.Width, _motionFrame.Height), _motionPosition);
             _motionPreview.Show(_motionImage!, sample);
             HideUnderMotion();
+            EnsureTabsPanel();
         }
         catch (Exception ex)
         {
@@ -182,6 +184,7 @@ internal sealed partial class EmulatorSession
         }
         HideUnderMotion();
         EnsureMotionPanel();
+        EnsureTabsPanel();
         return true;
     }
 
@@ -205,26 +208,19 @@ internal sealed partial class EmulatorSession
 
     private void EnsureMotionPanel()
     {
-        if (!ShowDeviceControls)
+        if (!ShowDeviceControls || _app.IsHiddenInGroup(this))
         {
             _motionPanel?.Hide();
             return;
         }
         if (_motionPanel == null)
         {
-            _motionPanel = new DeviceMotionPanel(Main, Shake);
+            _motionPanel = new DeviceMotionPanel(Main, Shake, ResetToFrame);
             UpdateCompanions();
         }
-        var device = new Rectangle(_overlay.Position, new Size(_current.Width, _current.Height));
+        var device = DeviceBounds();
         bool poses = _app.Config.DuoPoseControls && _panel?.Window.IsVisible == true;
-        if (Frame != null && IPhoneDuo.IsDuo(Frame))
-        {
-            double sx = (double)_pictureOnScreen.Width / Frame.Screen.Width;
-            int border = (int)Math.Round(DuoFrames.Border * sx), hinge = (int)Math.Round(DuoFrames.HingeOut * sx);
-            device = Rectangle.FromLTRB(_pictureOnScreen.Left - border - (Pose == DuoPose.Folded ? hinge : 0),
-                _pictureOnScreen.Top - border - (Pose == DuoPose.Tent ? hinge : 0), _pictureOnScreen.Right + border, _pictureOnScreen.Bottom + border);
-        }
         uint dpi = GetDpiForWindow(Main);
-        _motionPanel.Show(device, poses, dpi == 0 ? 1 : dpi / 96f, CanMoveDevice, _motionState?.Strength ?? 0);
+        _motionPanel.Show(device, poses, dpi == 0 ? 1 : dpi / 96f, CanMoveDevice, _motionState?.Strength ?? 0, Frame != null, _resetting);
     }
 }

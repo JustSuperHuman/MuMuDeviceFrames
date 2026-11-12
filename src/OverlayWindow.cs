@@ -130,7 +130,7 @@ internal sealed class OverlayWindow : NativeWindow
 
     protected override void WndProc(ref Message m)
     {
-        if (Mouse != null && m.Msg is WM_MOUSEMOVE or WM_LBUTTONDOWN or WM_LBUTTONUP or WM_MOUSELEAVE or WM_LBUTTONDBLCLK)
+        if (Mouse != null && m.Msg is WM_MOUSEMOVE or WM_LBUTTONDOWN or WM_LBUTTONUP or WM_MOUSELEAVE or WM_LBUTTONDBLCLK or WM_RBUTTONUP)
         {
             if (m.Msg == WM_MOUSEMOVE)
             {

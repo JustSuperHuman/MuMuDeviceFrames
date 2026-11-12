@@ -54,6 +54,28 @@ internal static class EmulatorClip
     public static bool IsHidden(IntPtr hwnd) =>
         GetWindowRgnBox(hwnd, out var box) is not (ERROR or NULLREGION) && box.Right - box.Left <= 1 && box.Bottom - box.Top <= 1;
 
+    /// <summary>
+    /// Hides an inactive grouped emulator window completely: zero visible pixels, zero mouse hit-testing, and no DWM
+    /// border or shadow, while keeping <c>WS_VISIBLE</c> so taskbar items, Alt+Tab and clean restoration keep working.
+    /// </summary>
+    public static bool HideCompletely(IntPtr hwnd)
+    {
+        SetAttribute(hwnd, DWMWA_NCRENDERING_POLICY, DWMNCRP_DISABLED);
+        SetAttribute(hwnd, DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE);
+        SetAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND);
+        IntPtr empty = CreateRectRgn(0, 0, 0, 0);
+        if (empty == IntPtr.Zero) return false;
+        if (SetWindowRgn(hwnd, empty, true) == 0)
+        {
+            DeleteObject(empty);
+            return false;
+        }
+        return true;
+    }
+
+    /// <summary>True while the window carries the empty region installed by <see cref="HideCompletely"/>.</summary>
+    public static bool IsCompletelyHidden(IntPtr hwnd) => GetWindowRgnBox(hwnd, out _) == NULLREGION;
+
     /// <summary>True while the window still carries the region we installed (nobody replaced or removed it).</summary>
     public static bool IsIntact(IntPtr hwnd, RECT expected)
     {

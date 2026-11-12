@@ -13,6 +13,7 @@ internal sealed partial class EmulatorSession : IDisposable
     private OverlayWindow? _overlay;
     private OverlayWindow? _glass; // click-through layer over the picture (the open iPhone Duo's crease)
     private DuoPosePanel? _panel;  // iPhone Duo pose buttons beside the frame
+    private EmulatorTabsPanel? _tabsPanel; // grouped emulator tab bar above the frame
     private OverlayWindow? _chrome; // iOS chrome over the picture: home indicator, or the Duo's rail / status bar
     private (ChromeState State, Size Picture)? _chromeShown;
     private System.Windows.Forms.Timer? _chromeTimer;
@@ -31,6 +32,8 @@ internal sealed partial class EmulatorSession : IDisposable
     private DateTime _afterNotBefore;
     private DateTime? _afterShownAt;
     private bool _hiddenUnderAnimation; // clipped to a dot while the animation stands in for it
+    private bool _hiddenInGroup;        // clipped to an empty region while another grouped tab is shown
+    private bool _resetting;
     private readonly PoseShots _shots = new(); // each pose's last picture, the stand-in for the next switch into it
     private System.Windows.Forms.Timer? _afterTimer;
     private bool _warmed;
@@ -93,8 +96,31 @@ internal sealed partial class EmulatorSession : IDisposable
     /// <summary>Title bar temporarily brought back (bezel double-click) without dropping the frame.</summary>
     public bool Peek { get; set; }
 
+    public bool IsResetting => _resetting;
+
+    public bool IsFullscreen => !IsIconic(Main) && IsWindow(Render)
+        && GetWindowRect(Render, out var rr) && rr.Left > -30000 && CoversMonitor(rr);
+
+    public TabDeviceKind TabKind => Frame switch
+    {
+        { } f when IPhoneDuo.IsDuo(f) => TabDeviceKind.Duo,
+        { } f when f.Category.Contains("Tablet", StringComparison.OrdinalIgnoreCase) || f.Category.Contains("iPad", StringComparison.OrdinalIgnoreCase)
+            => (RenderSize is { Width: > 0, Height: > 0 } ? RenderSize.Width > RenderSize.Height : f.IsLandscape)
+                ? TabDeviceKind.TabletLandscape : TabDeviceKind.Tablet,
+        { } f => (RenderSize is { Width: > 0, Height: > 0 } ? RenderSize.Width > RenderSize.Height : f.IsLandscape)
+            ? TabDeviceKind.PhoneLandscape : TabDeviceKind.Phone,
+        _ => TabDeviceKind.Phone,
+    };
+
+    public Point? CurrentFrameCentre => _overlay is { IsAlive: true } ov && _current != null
+        ? DeviceAnchor.Centre(new Rectangle(ov.Position, new Size(_current.Width, _current.Height)))
+        : GetWindowRect(Main, out var wr) && wr.Left > -30000
+            ? new Point((wr.Left + wr.Right) / 2, (wr.Top + wr.Bottom) / 2)
+            : null;
+
     public Rectangle? RecordingBounds(int padding)
     {
+        if (_app.IsHiddenInGroup(this)) _app.SelectGroupSession(this, activateWindow: false);
         Sync();
         if (_disposed || !_app.Config.Enabled || !_app.Config.Instance(Title).Enabled ||
             _current == null || _overlay is not { IsAlive: true, IsVisible: true } || IsIconic(Main)) return null;
@@ -159,10 +185,22 @@ internal sealed partial class EmulatorSession : IDisposable
 
         // Minimised: the window manager hides and re-shows owned windows by itself. Keeping the clip region in place
         // avoids the title bar flashing up during the restore animation.
-        if (IsIconic(Main) && config.Enabled && instance.Enabled) { StopMotion(restore: false); return; }
+        if (IsIconic(Main) && config.Enabled && instance.Enabled)
+        {
+            StopMotion(restore: false);
+            _tabsPanel?.Hide();
+            _motionPanel?.Hide();
+            _panel?.Hide();
+            return;
+        }
 
         bool wanted = config.Enabled && instance.Enabled && Render != IntPtr.Zero
             && IsWindowVisible(Main) && !IsZoomed(Main) && !_app.IsBeingCreated(Title);
+        if (wanted && _app.IsHiddenInGroup(this))
+        {
+            ParkInGroup();
+            return;
+        }
         if (!wanted || !GetWindowRect(Main, out var wr) || !GetWindowRect(Render, out var rr) || rr.Width < 64 || rr.Height < 64 || CoversMonitor(rr))
         {
             Suspend();
@@ -214,7 +252,7 @@ internal sealed partial class EmulatorSession : IDisposable
         // display is on, any frame or placement could be the wrong one (and would flash up for a moment).
         if (!_displayAnswered && (IPhoneDuo.IsDuo(Frame) || (chosen == null && IPhoneDuo.LooksLikeSurface(RenderSize))))
         {
-            Suspend();
+            if (_hiddenInGroup) HideOverlaysOnly(); else Suspend();
             return;
         }
 
@@ -224,7 +262,7 @@ internal sealed partial class EmulatorSession : IDisposable
         {
             if (IsDuoSurface && Pose == null)
             {
-                Suspend(); // a pose is on its way (see EnsureAndroid)
+                if (_hiddenInGroup) HideOverlaysOnly(); else Suspend(); // a pose is on its way (see EnsureAndroid)
                 return;
             }
             if (Pose is { } shown && IPhoneDuo.PictureInRender(shown, RenderSize) is { } part)
@@ -256,7 +294,7 @@ internal sealed partial class EmulatorSession : IDisposable
         if (_current == null || _current.Key != key)
         {
             // Never show a frame that doesn't match the picture; take it down until the new one is ready.
-            Suspend();
+            if (_hiddenInGroup) HideOverlaysOnly(); else Suspend();
             if (_pending != key) StartRender(Frame, key);
             return;
         }
@@ -269,6 +307,7 @@ internal sealed partial class EmulatorSession : IDisposable
         EnsureChrome();
         EnsurePosePanel();
         EnsureMotionPanel();
+        EnsureTabsPanel();
         _laidOut = (wr, rr);
     }
 
@@ -477,23 +516,48 @@ internal sealed partial class EmulatorSession : IDisposable
     /// Only the user moves the anchor: dragging the device by its bezel, or Windows' move / size loop on MuMu's own
     /// window (its title bar or border). True when it moved the window.
     /// </summary>
+    private Rectangle EffectiveWorkArea(Point point)
+    {
+        var work = Screen.FromPoint(point).WorkingArea;
+        if (Peek || !_app.HasVisibleGroupTabs(this)) return work;
+        uint dpi = GetDpiForWindow(Main);
+        float scale = dpi == 0 ? 1f : dpi / 96f;
+        int reserve = EmulatorTabsPanel.ReservedHeight(scale, _app.Config.RecordingPadding);
+        return new Rectangle(work.Left, work.Top + reserve, work.Width, Math.Max(200, work.Height - reserve));
+    }
+
     private bool KeepPut(RECT wr, RECT rr, Rectangle picture)
     {
         if (Peek || _current == null) return false;
         var frame = new Rectangle(rr.Left + picture.X - _current.RenderOffset.X, rr.Top + picture.Y - _current.RenderOffset.Y, _current.Width, _current.Height);
         var centre = DeviceAnchor.Centre(frame);
         var config = _app.Config.Instance(Title);
-        if (config.Anchor == null || _userMoving || _reanchor || _overlay?.IsDragging == true)
+        bool grouped = _app.IsGrouped(this);
+        var stored = grouped ? _app.Config.GroupAnchor ?? config.Anchor : config.Anchor;
+        if (stored == null || _userMoving || _reanchor || _overlay?.IsDragging == true)
         {
             _reanchor = false;
             _anchorMoves = 0;
-            if (config.Anchor is { } old && old.X == centre.X && old.Y == centre.Y) return false;
-            config.Anchor = new AnchorPoint(centre.X, centre.Y);
+            if (grouped)
+            {
+                if (_app.Config.GroupAnchor is { } oldGroup && oldGroup.X == centre.X && oldGroup.Y == centre.Y) return false;
+                _app.Config.GroupAnchor = new AnchorPoint(centre.X, centre.Y);
+            }
+            else
+            {
+                if (config.Anchor is { } old && old.X == centre.X && old.Y == centre.Y) return false;
+                config.Anchor = new AnchorPoint(centre.X, centre.Y);
+            }
             SaveAnchorSoon();
             return false;
         }
-        var anchor = config.Anchor.ToPoint();
-        var work = Screen.FromPoint(anchor).WorkingArea;
+        if (grouped && _app.Config.GroupAnchor == null)
+        {
+            _app.Config.GroupAnchor = new AnchorPoint(stored.X, stored.Y);
+            SaveAnchorSoon();
+        }
+        var anchor = stored.ToPoint();
+        var work = EffectiveWorkArea(anchor);
         // A device bigger than the work area cannot be placed on it: make MuMu's window (and with it the picture and
         // the frame) smaller first, about the same centre; the next layout puts it on the anchor.
         if (DeviceAnchor.PictureToFit(new Size(rr.Width, rr.Height), frame.Size, work) is { } fits && ++_anchorMoves <= 3)
@@ -564,7 +628,18 @@ internal sealed partial class EmulatorSession : IDisposable
         if (!_disposed && IsDuoSurface && Instance != null && Display != null && !_androidBusy && _animation == null
             && DateTime.UtcNow >= _nextPosePoll && !IsGone && !IsIconic(Main)) PollPose();
         // Minimised or hidden: Windows hides the owned frame windows itself, and Sync leaves that alone.
-        if (_disposed || _laidOut is not { } laid || _animation != null || IsGone || IsIconic(Main) || !IsWindowVisible(Main)) return;
+        if (_disposed || IsGone || IsIconic(Main) || !IsWindowVisible(Main)) return;
+        if (_hiddenInGroup)
+        {
+            if (_app.IsHiddenInGroup(this))
+            {
+                if (!EmulatorClip.IsCompletelyHidden(Main)) EmulatorClip.HideCompletely(Main);
+                return;
+            }
+            Sync();
+            return;
+        }
+        if (_laidOut is not { } laid || _animation != null) return;
         bool moved = !GetWindowRect(Main, out var wr) || !GetWindowRect(Render, out var rr) || !Same(wr, laid.Window) || !Same(rr, laid.Render);
         bool lost = _overlay is { IsAlive: true } overlay && !overlay.IsAsSet();
         // The clip region taken away (by MuMu, the theming layer or anyone): Sync puts it back. Peek has no region on
@@ -610,10 +685,11 @@ internal sealed partial class EmulatorSession : IDisposable
                 ? new Point((rr.Left + rr.Right) / 2 - render.Width / 2, (rr.Top + rr.Bottom) / 2 - render.Height / 2)
                 : new Point(rr.Left, rr.Top);
             var afterScreen = new RectangleF(origin.X + picture.X - rendered.RenderOffset.X, origin.Y + picture.Y - rendered.RenderOffset.Y, rendered.Width, rendered.Height);
-            if (!Peek && _app.Config.Instance(Title).Anchor is { } anchor)
+            var activeAnchor = _app.IsGrouped(this) ? _app.Config.GroupAnchor ?? _app.Config.Instance(Title).Anchor : _app.Config.Instance(Title).Anchor;
+            if (!Peek && activeAnchor is { } anchor)
             {
                 // The device lands where it lives (KeepPut moves MuMu's window there before the new picture is taken).
-                var landing = DeviceAnchor.Place(new Size(rendered.Width, rendered.Height), anchor.ToPoint(), Screen.FromPoint(anchor.ToPoint()).WorkingArea);
+                var landing = DeviceAnchor.Place(new Size(rendered.Width, rendered.Height), anchor.ToPoint(), EffectiveWorkArea(anchor.ToPoint()));
                 afterScreen = new RectangleF(landing.X, landing.Y, landing.Width, landing.Height);
             }
             var placeholder = Composite(rendered, wr, null)!;
@@ -726,6 +802,7 @@ internal sealed partial class EmulatorSession : IDisposable
         _glass?.SetVisible(false);
         _chrome?.SetVisible(false);
         _fade?.SetVisible(false);
+        _tabsPanel?.Hide();
         // Nothing for the old pose and nothing on a size on the way: the frame that matters is the new pose's, once
         // Android has switched and MuMu has finished turning its window for it.
         if (settling || Pose != _animationTarget) return;
@@ -813,10 +890,27 @@ internal sealed partial class EmulatorSession : IDisposable
         });
     }
 
+    internal Rectangle DeviceBounds()
+    {
+        if (_overlay == null || _current == null) return _pictureOnScreen;
+        if (Frame != null && IPhoneDuo.IsDuo(Frame))
+        {
+            double sx = (double)_pictureOnScreen.Width / Frame.Screen.Width;
+            int border = (int)Math.Round(DuoFrames.Border * sx), hinge = (int)Math.Round(DuoFrames.HingeOut * sx);
+            return Rectangle.FromLTRB(
+                _pictureOnScreen.Left - border - (Pose == DuoPose.Folded ? hinge : 0),
+                _pictureOnScreen.Top - border - (Pose == DuoPose.Tent ? hinge : 0),
+                _pictureOnScreen.Right + border,
+                _pictureOnScreen.Bottom + border);
+        }
+        var at = _motionPreview?.Visible == true ? _motionPosition : _overlay.Position;
+        return new Rectangle(at, new Size(_current.Width, _current.Height));
+    }
+
     /// <summary>The pose buttons beside a Duo frame: where the device ends on screen, the pose, what is available.</summary>
     private void EnsurePosePanel()
     {
-        if (!IPhoneDuo.IsDuo(Frame) || !IsDuoSurface || !_app.Config.DuoPoseControls || Frame == null)
+        if (!IPhoneDuo.IsDuo(Frame) || !IsDuoSurface || !_app.Config.DuoPoseControls || Frame == null || _app.IsHiddenInGroup(this))
         {
             _panel?.Hide();
             return;
@@ -840,18 +934,49 @@ internal sealed partial class EmulatorSession : IDisposable
                 return;
             }
         }
-        // The device's outline: the picture plus the bezel (and the hinge barrel on the closed phone's left).
-        double sx = (double)_pictureOnScreen.Width / Frame.Screen.Width;
-        int border = (int)Math.Round(DuoFrames.Border * sx), hinge = (int)Math.Round(DuoFrames.HingeOut * sx);
-        int left = Pose == DuoPose.Folded ? hinge : 0, top = Pose == DuoPose.Tent ? hinge : 0; // the barrel: left closed, on top in tent
-        var device = Rectangle.FromLTRB(_pictureOnScreen.Left - border - left, _pictureOnScreen.Top - border - top, _pictureOnScreen.Right + border, _pictureOnScreen.Bottom + border);
+        var device = DeviceBounds();
         uint dpi = GetDpiForWindow(Main);
         _panel.Show(device, _animationTarget is { } going && _animation != null ? going : Pose, IsFoldable, dpi == 0 ? 1f : dpi / 96f);
     }
 
+    /// <summary>The horizontal tab bar above the active grouped device for swapping between running emulators.</summary>
+    public void EnsureTabsPanel()
+    {
+        bool frameShown = _overlay is { IsAlive: true } ov && (ov.IsVisible || _motionPreview?.Visible == true);
+        if (_disposed || Peek || !frameShown || _current == null || _animation?.OnScreen == true
+            || _motionState?.Tilting == true || !_app.HasVisibleGroupTabs(this))
+        {
+            _tabsPanel?.Hide();
+            return;
+        }
+        var tabs = _app.BuildGroupTabs();
+        if (tabs.Count < 2)
+        {
+            _tabsPanel?.Hide();
+            return;
+        }
+        if (_tabsPanel is not { IsAlive: true })
+        {
+            try
+            {
+                _tabsPanel = new EmulatorTabsPanel(Main, _app.SelectGroupByHandle, _app.ShowMenuByHandle);
+                UpdateCompanions();
+            }
+            catch (Exception ex)
+            {
+                Log.Write($"Tabs panel failed for '{Title}': {ex.Message}");
+                return;
+            }
+        }
+        uint dpi = GetDpiForWindow(Main);
+        float scale = dpi == 0 ? 1f : dpi / 96f;
+        var overlayOrigin = _motionPreview?.Visible == true ? _motionPosition : _overlay!.Position;
+        _tabsPanel.Show(DeviceBounds(), overlayOrigin, tabs, scale, _app.Config.RecordingPadding);
+    }
+
     private void UpdateCompanions()
     {
-        if (_overlay != null) _overlay.Companions = [_bar, _glass, _chrome, _panel?.Window, _motionPanel?.Window];
+        if (_overlay != null) _overlay.Companions = [_bar, _glass, _chrome, _panel?.Window, _motionPanel?.Window, _tabsPanel?.Window];
     }
 
     /// <summary>
@@ -1868,7 +1993,7 @@ internal sealed partial class EmulatorSession : IDisposable
         if (_overlay is { IsAlive: true }) return _overlay;
         try
         {
-            _overlay = new OverlayWindow(Main, _app.Config.BezelInteractive) { Companions = [_bar, _glass, _chrome, _panel?.Window, _motionPanel?.Window] };
+            _overlay = new OverlayWindow(Main, _app.Config.BezelInteractive) { Companions = [_bar, _glass, _chrome, _panel?.Window, _motionPanel?.Window, _tabsPanel?.Window] };
             _overlay.MenuRequested += () => _app.ShowSessionMenu(this);
             _overlay.DragEnded += () => { _reanchor = true; Sync(); };
             _overlay.DoubleClicked += () => { Peek = !Peek; Sync(); };
@@ -1889,7 +2014,7 @@ internal sealed partial class EmulatorSession : IDisposable
             ClearRegion();
             return;
         }
-        if (_region is { } applied && applied.Offset == renderOffsetInWindow && applied.Key == _current.Key
+        if (!_hiddenInGroup && _region is { } applied && applied.Offset == renderOffsetInWindow && applied.Key == _current.Key
             && EmulatorClip.IsIntact(Main, applied.Box))
             return;
 
@@ -1905,6 +2030,7 @@ internal sealed partial class EmulatorSession : IDisposable
         }
         _clipFailures = 0;
         _hiddenUnderAnimation = false;
+        _hiddenInGroup = false;
         PlacePictureSoon();
         bool first = _region == null;
         _region = (renderOffsetInWindow, _current.Key, box);
@@ -1931,12 +2057,244 @@ internal sealed partial class EmulatorSession : IDisposable
 
     private void ClearRegion()
     {
-        if (_region == null && !_hiddenUnderAnimation) return; // also when it goes (or the app exits) mid-animation
+        if (_region == null && !_hiddenUnderAnimation && !_hiddenInGroup) return; // also when it goes (or the app exits) mid-animation
         _region = null;
         _hiddenUnderAnimation = false;
+        _hiddenInGroup = false;
         _verifyTimer?.Stop();
         EmulatorClip.Remove(Main);
         PlacePictureSoon();
+    }
+
+    private void HideOverlaysOnly()
+    {
+        StopMotion(restore: false);
+        _motionPanel?.Hide();
+        _tabsPanel?.Hide();
+        _laidOut = null;
+        _overlay?.SetVisible(false);
+        _glass?.SetVisible(false);
+        _chrome?.SetVisible(false);
+        _panel?.Hide();
+        _fade?.SetVisible(false);
+        _bar?.SetVisible(false);
+        _barTimer?.Stop();
+    }
+
+    /// <summary>
+    /// Hides an inactive grouped emulator behind an empty region while keeping its Android discovery and rendered frame
+    /// warm in the background so switching tabs is instantaneous.
+    /// </summary>
+    private void ParkInGroup()
+    {
+        _animation?.Dispose();
+        _animation = null;
+        HideOverlaysOnly();
+        if (!IsIconic(Main))
+        {
+            _region = null;
+            _hiddenUnderAnimation = false;
+            _hiddenInGroup = true;
+            if (!EmulatorClip.IsCompletelyHidden(Main))
+            {
+                EmulatorClip.HideCompletely(Main);
+                StartVerifyBurst(8);
+            }
+        }
+        if (GetWindowRect(Render, out var rr) && rr.Left > -30000 && rr.Width >= 64 && rr.Height >= 64 && !CoversMonitor(rr))
+        {
+            RenderSize = new Size(rr.Width, rr.Height);
+            var instance = _app.Config.Instance(Title);
+            var chosen = _app.Library.Find(instance.Frame);
+            if (Pose is { } pose && (chosen == null || IPhoneDuo.IsDuo(chosen))) chosen = _app.Library.Find(IPhoneDuo.FrameKey(pose)) ?? chosen;
+            else if (chosen == null && IsDuoSurface && IsFoldable) chosen = _app.Library.Find(IPhoneDuo.FrameKey(DuoPose.Folded));
+            var prevFrame = Frame;
+            Frame = chosen ?? _app.Library.Find(_app.Config.DefaultFrame) ?? _app.Library.BestMatch(rr.Width, rr.Height);
+            if (Frame != prevFrame) _app.RefreshActiveGroupTabs();
+            if (Frame != null)
+            {
+                EnsureAndroid();
+                var picture = new Rectangle(0, 0, rr.Width, rr.Height);
+                if (IPhoneDuo.IsDuo(Frame) && Pose is { } shown && IPhoneDuo.PictureInRender(shown, RenderSize) is { } part)
+                    picture = part;
+                var key = new RenderKey(Frame.Key, picture.Width, picture.Height, Math.Clamp(_app.Config.Overlap, 0, 8));
+                if ((_current == null || _current.Key != key) && _pending != key)
+                    StartRender(Frame, key);
+            }
+        }
+    }
+
+    /// <summary>Brings a grouped emulator onto the shared group anchor and shows its frame in a single UI turn.</summary>
+    public void ActivateInGroup()
+    {
+        _anchorMoves = 0;
+        if (IsIconic(Main)) ShowWindow(Main, SW_RESTORE);
+        Sync();
+        if (_hiddenInGroup && !_disposed && !IsGone) Sync();
+    }
+
+    private void ResetSessionTransientState()
+    {
+        _failedCutout = null;
+        _anchorMoves = 0;
+        _fittedRender = Size.Empty;
+        _letterboxSince = null;
+        _clipFailures = 0;
+        _resyncAttempts = 0;
+        _duoChromeRetry.Reset();
+        _duoChromeNotice = false;
+        _safeAreaRefresh.Reset();
+        _safeAreaNoticeShown = false;
+        _gesturesChecked = false;
+        _turnSince = null;
+        _disagreeSince = null;
+        _nextCutoutCheck = DateTime.MinValue;
+        _nextPendingCheck = DateTime.MinValue;
+    }
+
+    /// <summary>
+    /// Full one-click reset for this emulator: fixes Android screen size, density, orientation, cutouts and status bar,
+    /// turns MuMu's host window to match, clears letterboxing, and fits the device cleanly inside the display work area.
+    /// </summary>
+    public void ResetToFrame()
+    {
+        if (_disposed || _resetting) return;
+        StopMotion(restore: false);
+        Peek = false;
+
+        if (!_app.Config.Enabled) _app.Config.Enabled = true;
+        var instanceCfg = _app.Config.Instance(Title);
+        instanceCfg.Enabled = true;
+        instanceCfg.FitToFrame = true;
+        _app.Config.Save();
+
+        _app.PrepareForReset(this);
+        ResetSessionTransientState();
+
+        if (IsIconic(Main) || IsZoomed(Main))
+            ShowWindow(Main, SW_RESTORE);
+
+        var chosen = _app.Library.Find(instanceCfg.Frame);
+        if (chosen == null && (IsDuoSurface || instanceCfg.DuoPose != null || instanceCfg.DuoOverlay != null))
+            chosen = _app.Library.Find(IPhoneDuo.FrameKey(instanceCfg.DuoPose ?? Pose ?? DuoPose.Folded));
+        var frame = chosen ?? Frame ?? _app.Library.Find(_app.Config.DefaultFrame)
+            ?? (GetWindowRect(Render, out var rr0) && rr0.Width > 0 && rr0.Height > 0 ? _app.Library.BestMatch(rr0.Width, rr0.Height) : null);
+
+        if (frame == null)
+        {
+            _app.Notify($"{Title}: download device frames first from the tray menu.", warning: true);
+            return;
+        }
+
+        Frame = frame;
+        _resetting = true;
+        EnsureMotionPanel();
+        Sync();
+
+        string title = Title;
+        uint pid = Pid;
+        var knownInstance = Instance;
+        Log.Write($"'{title}': full reset started for {frame.Key}");
+        _app.Notify($"{title}: fixing orientation, screen size and safe areas for {frame.Model}…");
+
+        RunAndroidTask(() =>
+        {
+            ResetResult result;
+            try
+            {
+                var mumu = knownInstance ?? MuMuControl.Locate(pid) ?? MuMuControl.LocateByName(title);
+                if (mumu == null)
+                {
+                    result = new ResetResult(false, false, false, $"{title}: could not connect to MuMu or adb.", null, null);
+                }
+                else
+                {
+                    result = DeviceReset.Run(
+                        mumu,
+                        title,
+                        frame,
+                        _app.Config,
+                        _app.Config.Instance(title),
+                        () => _app.CurrentRenderSizeOf(title),
+                        msg => _app.Post(() => _app.Notify(msg)));
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Write($"'{title}': reset failed: {ex}");
+                result = new ResetResult(false, false, false, $"{title}: reset failed ({ex.Message}).", null, null);
+            }
+
+            _app.Post(() => _app.CompleteReset(title, frame, result));
+            return () => { _resetting = false; EnsureMotionPanel(); };
+        });
+    }
+
+    public void ApplyPostResetGeometry(FrameInfo frame, AndroidDisplay? display, DuoPose? pose)
+    {
+        _resetting = false;
+        if (display != null) Display = display;
+        if (pose != null || IPhoneDuo.IsDuo(frame)) Pose = pose ?? IPhoneDuo.Detect(display);
+        else Pose = null;
+        _displayAnswered = true;
+        ResetSessionTransientState();
+
+        if (IsIconic(Main) || IsZoomed(Main))
+            ShowWindow(Main, SW_RESTORE);
+
+        if (GetWindowRect(Main, out var wr) && GetWindowRect(Render, out var rr) && wr.Left > -30000 && rr.Width >= 64 && rr.Height >= 64)
+        {
+            RenderSize = new Size(rr.Width, rr.Height);
+            var spec = DeviceSpecs.For(frame);
+            var picture = new Rectangle(0, 0, rr.Width, rr.Height);
+            if (IPhoneDuo.IsDuo(frame) && Pose is { } p && IPhoneDuo.PictureInRender(p, RenderSize) is { } part)
+                picture = part;
+
+            var key = new RenderKey(frame.Key, picture.Width, picture.Height, Math.Clamp(_app.Config.Overlap, 0, 8));
+            _current = FrameRenderer.Render(frame, key);
+            _pending = null;
+
+            bool grouped = _app.IsGrouped(this);
+            var instanceCfg = _app.Config.Instance(Title);
+            var rawAnchor = (grouped ? _app.Config.GroupAnchor ?? instanceCfg.Anchor : instanceCfg.Anchor)?.ToPoint()
+                ?? new Point(wr.Left + wr.Width / 2, wr.Top + wr.Height / 2);
+            var work = EffectiveWorkArea(rawAnchor);
+
+            var winRect = new Rectangle(wr.Left, wr.Top, wr.Width, wr.Height);
+            var renRect = new Rectangle(rr.Left, rr.Top, rr.Width, rr.Height);
+            var frameSize = new Size(_current.Width, _current.Height);
+            if (DeviceReset.IdealWindowBounds(winRect, renRect, frameSize, spec.Native, work) is { } ideal)
+            {
+                Log.Write($"'{Title}': reset resizing MuMu window {wr.Width}x{wr.Height} -> {ideal.Width}x{ideal.Height}");
+                SetWindowPos(Main, IntPtr.Zero, ideal.X, ideal.Y, ideal.Width, ideal.Height, SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+                if (GetWindowRect(Render, out var rrAfter) && rrAfter.Width >= 64 && rrAfter.Height >= 64)
+                {
+                    RenderSize = new Size(rrAfter.Width, rrAfter.Height);
+                    var picAfter = new Rectangle(0, 0, rrAfter.Width, rrAfter.Height);
+                    if (IPhoneDuo.IsDuo(frame) && Pose is { } p2 && IPhoneDuo.PictureInRender(p2, RenderSize) is { } part2)
+                        picAfter = part2;
+                    var keyAfter = new RenderKey(frame.Key, picAfter.Width, picAfter.Height, Math.Clamp(_app.Config.Overlap, 0, 8));
+                    _current = FrameRenderer.Render(frame, keyAfter);
+                    frameSize = new Size(_current.Width, _current.Height);
+                }
+            }
+
+            var healed = DeviceReset.ClampAnchor(frameSize, rawAnchor, work);
+            if (grouped) _app.Config.GroupAnchor = new AnchorPoint(healed.X, healed.Y);
+            else instanceCfg.Anchor = new AnchorPoint(healed.X, healed.Y);
+            _app.Config.Save();
+        }
+
+        _region = null;
+        _shown = null;
+        _glassShown = null;
+        _barShown = null;
+        _chromeShown = null;
+        _barLayout = null;
+        _laidOut = null;
+        Sync();
+        if (!_disposed && !IsGone) Sync();
+        StartVerifyBurst(30);
     }
 
     /// <summary>
@@ -1971,16 +2329,7 @@ internal sealed partial class EmulatorSession : IDisposable
     /// <summary>Gives the emulator its normal look back and hides the frame (keeps the rendered bitmap for later).</summary>
     public void Suspend()
     {
-        StopMotion(restore: false);
-        _motionPanel?.Hide();
-        _laidOut = null;
-        _overlay?.SetVisible(false);
-        _glass?.SetVisible(false);
-        _chrome?.SetVisible(false);
-        _panel?.Hide();
-        _fade?.SetVisible(false);
-        _bar?.SetVisible(false);
-        _barTimer?.Stop();
+        HideOverlaysOnly();
         ClearRegion();
     }
 
@@ -2031,6 +2380,8 @@ internal sealed partial class EmulatorSession : IDisposable
         _glass = null;
         _panel?.Dispose();
         _panel = null;
+        _tabsPanel?.Dispose();
+        _tabsPanel = null;
         _chromeTimer?.Dispose();
         _chromeTimer = null;
         if (_chrome is { IsAlive: true }) _chrome.DestroyHandle();

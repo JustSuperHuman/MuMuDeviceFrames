@@ -38,6 +38,19 @@ internal static class Program
         }
         //   --startup on|off                   start with Windows (per-user Run key)
         if (args.Length >= 2 && args[0] == "--startup") { Startup.Set(args[1] == "on"); return 0; }
+        //   --group on|off                     group running emulators into top tabs (on by default)
+        if (args.Length == 2 && args[0] == "--group" && args[1] is "on" or "off")
+        {
+            bool enabled = args[1] == "on";
+            if (TrayApp.IsRunning) return TrayApp.RequestGroupModeOfRunningInstance(enabled) ? 0 : 1;
+            var cfg = AppConfig.Load();
+            cfg.GroupEmulators = enabled;
+            cfg.Save();
+            return 0;
+        }
+        //   --reset [name|--all]               fix orientation, screen size, window fit and safe areas for the frame
+        if (args.Length is 1 or 2 && args[0] == "--reset")
+            return RunResetCommand(args.Length == 2 ? args[1] : null);
         //   --exit                             ask the running instance to quit cleanly
         if (args.Length >= 1 && args[0] == "--exit") return TrayApp.RequestExitOfRunningInstance() ? 0 : 1;
         //   --expo-reload / --expo-gear [name] run an Expo action on the active or named emulator
@@ -325,6 +338,73 @@ internal static class Program
             Log.Write($"iPhone Duo {pose} on '{name}' failed: {ex}");
             return 1;
         }
+    }
+
+    /// <summary>--reset [name|--all]: through the running tray app when up, else directly via adb and MuMuManager.</summary>
+    private static int RunResetCommand(string? name)
+    {
+        try
+        {
+            if (TrayApp.IsRunning) return TrayApp.RequestResetOfRunningInstance(name) ? 0 : 1;
+            if (name == null || string.Equals(name, "--all", StringComparison.OrdinalIgnoreCase))
+            {
+                if (MuMuControl.FindManager() is not { } manager) { Say("MuMuManager not found."); return 2; }
+                var running = MuMuControl.List(manager).Where(e => e.Running).ToList();
+                if (running.Count == 0) { Say("No running MuMu emulators found."); return 2; }
+                if (name == null && running.Count > 1)
+                {
+                    Say($"Several emulators are running ({string.Join(", ", running.Select(r => r.Name))}); pass a name or --all.");
+                    return 2;
+                }
+                int failures = 0;
+                foreach (var entry in running)
+                    if (ResetOneOffline(entry.Name) != 0) failures++;
+                return failures == 0 ? 0 : 1;
+            }
+            return ResetOneOffline(name);
+        }
+        catch (Exception ex)
+        {
+            Say($"Reset failed: {ex.Message}");
+            return 1;
+        }
+    }
+
+    private static int ResetOneOffline(string name)
+    {
+        var instance = MuMuControl.LocateByName(name);
+        if (instance == null) { Say($"No running emulator named {name}."); return 2; }
+        var config = AppConfig.Load();
+        var library = FrameLibrary.Load(config.FramesRoot);
+        var settings = config.Instance(name);
+        var display = MuMuControl.QueryDisplay(instance);
+        var frame = library.Find(settings.Frame)
+            ?? (display != null && IPhoneDuo.IsSurface(display.Native) ? library.Find(IPhoneDuo.FrameKey(settings.DuoPose ?? IPhoneDuo.Detect(display) ?? DuoPose.Folded)) : null)
+            ?? library.Find(config.DefaultFrame)
+            ?? (display != null ? library.BestMatch(display.Native.Width, display.Native.Height) : library.Frames.FirstOrDefault());
+        if (frame == null) { Say("No device frames installed."); return 2; }
+
+        Size? FindRenderSize()
+        {
+            Size? found = null;
+            EnumWindows((hwnd, _) =>
+            {
+                if (!IsWindowVisible(hwnd) || !string.Equals(GetWindowText(hwnd), name, StringComparison.OrdinalIgnoreCase)) return true;
+                IntPtr render = FindChildByClass(hwnd, EmulatorSession.RenderClass);
+                if (render != IntPtr.Zero && GetWindowRect(render, out var rr) && rr.Left > -30000 && rr.Width > 0 && rr.Height > 0)
+                {
+                    found = new Size(rr.Width, rr.Height);
+                    return false;
+                }
+                return true;
+            }, IntPtr.Zero);
+            return found;
+        }
+
+        var result = DeviceReset.Run(instance, name, frame, config, settings, FindRenderSize, Say);
+        config.Save();
+        Say(result.Summary);
+        return result.Ok ? 0 : 1;
     }
 
     /// <summary>Brings back the Android status bar on every running instance whose bar this tool hid (after a crash/kill).</summary>

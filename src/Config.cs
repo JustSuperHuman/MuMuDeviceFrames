@@ -68,6 +68,18 @@ internal sealed class AppConfig
 
     public bool Enabled { get; set; } = true;
 
+    /// <summary>
+    /// Group all framed emulators onto one shared place on screen with a tab bar above the device to swap between them.
+    /// On by default.
+    /// </summary>
+    public bool GroupEmulators { get; set; } = true;
+
+    /// <summary>
+    /// Where the grouped emulator stack sits on screen (centre of the active frame, screen pixels); kept separate from
+    /// per-emulator anchors so turning grouping off puts each emulator back in its own place.
+    /// </summary>
+    public AnchorPoint? GroupAnchor { get; set; }
+
     /// <summary>Clip the emulator window to the rounded screen shape so its title bar and borders vanish under the frame.</summary>
     public bool ClipToScreen { get; set; } = true;
 

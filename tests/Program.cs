@@ -20,6 +20,16 @@ if (args is ["--motion-render", var renderEmulator, var folder])
     MotionTests.Render(renderEmulator, folder);
     return;
 }
+if (args is ["--render-showcase", var heroFile, var showcaseOut])
+{
+    GroupAndResetTests.RenderReleaseShowcase(heroFile, showcaseOut);
+    return;
+}
+if (args is ["--preview-ui", var previewFolder])
+{
+    GroupAndResetTests.RenderPreviews(previewFolder);
+    return;
+}
 if (args is ["--update-live", var updateFolder])
 {
     await AppUpdateTests.RunLive(updateFolder);
@@ -31,6 +41,11 @@ AppUpdateTests.Run((condition, name) =>
     Console.WriteLine($"PASS {name}");
 });
 MotionTests.Run((condition, name) =>
+{
+    if (!condition) throw new Exception(name);
+    Console.WriteLine($"PASS {name}");
+});
+GroupAndResetTests.Run((condition, name) =>
 {
     if (!condition) throw new Exception(name);
     Console.WriteLine($"PASS {name}");
